@@ -19,7 +19,7 @@ jobs:
     steps:
 
       # ========================================
-      # Checkout repository
+      # Checkout
       # ========================================
 
       - name: Checkout
@@ -74,14 +74,12 @@ jobs:
 
           echo "SSH private key is valid."
 
-          echo "SSH key fingerprint:"
-
           ssh-keygen \
             -lf "$HOME/.ssh/id_ed25519.pub"
 
 
       # ========================================
-      # Configure known hosts
+      # Known hosts
       # ========================================
 
       - name: Configure known hosts
@@ -143,6 +141,12 @@ jobs:
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
 
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_API_URL: ${{ secrets.AI_API_URL }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+
         shell: bash
 
         run: |
@@ -152,6 +156,29 @@ jobs:
           echo "CONNECTING TO SERVER"
           echo "========================================"
 
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN secret is missing."
+            exit 1
+          fi
+
+          # Create a temporary environment file.
+          # It will be sent through SSH stdin and never printed.
+
+          ENV_FILE="$(mktemp)"
+
+          trap 'rm -f "$ENV_FILE"' EXIT
+
+          printf '%s\n' \
+            "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN" \
+            "AI_API_KEY=$AI_API_KEY" \
+            "AI_API_URL=$AI_API_URL" \
+            "AI_MODEL=$AI_MODEL" \
+            > "$ENV_FILE"
+
+          chmod 600 "$ENV_FILE"
+
+          echo "Connecting to server..."
+
           ssh \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
@@ -159,7 +186,21 @@ jobs:
             -o ConnectTimeout=20 \
             -i "$HOME/.ssh/id_ed25519" \
             "root@$SERVER_HOST" \
-            'bash -s' <<'REMOTE_SCRIPT'
+            'bash -s' < "$ENV_FILE" <<'REMOTE_SCRIPT'
+          REMOTE_SCRIPT
+
+          # The previous SSH command is intentionally only a connection
+          # test for the environment transfer. The actual deployment
+          # happens below with the same SSH key.
+
+          ssh \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            -i "$HOME/.ssh/id_ed25519" \
+            "root@$SERVER_HOST" \
+            'bash -s' <<REMOTE_SCRIPT
 
           set -e
 
@@ -168,7 +209,8 @@ jobs:
           # ======================================
 
           REPO_DIR="/root/MK-AI-Telegram-Bot"
-          VENV_DIR="$REPO_DIR/.venv"
+          VENV_DIR="\$REPO_DIR/.venv"
+          ENV_FILE="\$REPO_DIR/.env"
           LOG_FILE="/root/mk-ai-bot.log"
           PID_FILE="/root/mk-ai-bot.pid"
 
@@ -194,7 +236,7 @@ jobs:
           echo "UPDATING REPOSITORY"
           echo "========================================"
 
-          if [ ! -d "$REPO_DIR/.git" ]; then
+          if [ ! -d "\$REPO_DIR/.git" ]; then
 
               echo "Repository does not exist."
 
@@ -208,7 +250,7 @@ jobs:
 
           fi
 
-          cd "$REPO_DIR"
+          cd "\$REPO_DIR"
 
           git fetch origin main
 
@@ -218,6 +260,27 @@ jobs:
           echo "Current commit:"
 
           git rev-parse --short HEAD
+
+
+          # ======================================
+          # Create .env
+          # ======================================
+
+          echo
+          echo "========================================"
+          echo "CONFIGURING ENVIRONMENT"
+          echo "========================================"
+
+          cat > "\$ENV_FILE" <<'ENVEOF'
+TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+AI_API_KEY=${AI_API_KEY}
+AI_API_URL=${AI_API_URL}
+AI_MODEL=${AI_MODEL}
+ENVEOF
+
+          chmod 600 "\$ENV_FILE"
+
+          echo ".env configured."
 
 
           # ======================================
@@ -242,7 +305,7 @@ jobs:
 
 
           # ======================================
-          # Create virtual environment
+          # Virtual environment
           # ======================================
 
           echo
@@ -250,61 +313,59 @@ jobs:
           echo "CREATING VIRTUAL ENVIRONMENT"
           echo "========================================"
 
-          if [ ! -d "$VENV_DIR" ]; then
-
-              python3 -m venv "$VENV_DIR"
-
+          if [ ! -d "\$VENV_DIR" ]; then
+              python3 -m venv "\$VENV_DIR"
           fi
 
 
           # ======================================
-          # Upgrade pip
-          # ======================================
+          # Update pip
+          # ========================================
 
           echo
           echo "========================================"
           echo "UPDATING PIP"
           echo "========================================"
 
-          "$VENV_DIR/bin/python" \
+          "\$VENV_DIR/bin/python" \
             -m pip install \
             --upgrade pip
 
 
           # ======================================
-          # Install requirements
-          # ======================================
+          # Requirements
+          # ========================================
 
           echo
           echo "========================================"
           echo "INSTALLING REQUIREMENTS"
           echo "========================================"
 
-          "$VENV_DIR/bin/python" \
+          "\$VENV_DIR/bin/python" \
             -m pip install \
             -r requirements.txt
 
 
           # ======================================
           # Stop old bot
-          # ======================================
+          # ========================================
 
           echo
           echo "========================================"
           echo "STOPPING OLD MK AI PROCESS"
           echo "========================================"
 
-          if [ -f "$PID_FILE" ]; then
+          if [ -f "\$PID_FILE" ]; then
 
-              OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+              OLD_PID="\$(cat "\$PID_FILE" 2>/dev/null || true)"
 
-              if [ -n "$OLD_PID" ]; then
+              if [ -n "\$OLD_PID" ]; then
 
-                  if kill -0 "$OLD_PID" 2>/dev/null; then
+                  if kill -0 "\$OLD_PID" 2>/dev/null; then
 
-                      echo "Stopping old PID: $OLD_PID"
+                      echo "Stopping old PID: \$OLD_PID"
 
-                      kill "$OLD_PID" 2>/dev/null || true
+                      kill "\$OLD_PID" 2>/dev/null || true
 
                       sleep 3
 
@@ -312,37 +373,35 @@ jobs:
 
               fi
 
-              rm -f "$PID_FILE"
+              rm -f "\$PID_FILE"
 
           fi
 
 
-          # Kill only bot.py processes belonging to this repository
+          # Find only bot.py belonging to this repository
 
-          OLD_PIDS="$(
+          OLD_PIDS="\$(
               ps -eo pid,args \
               | grep '[p]ython.*bot.py' \
-              | grep "$REPO_DIR" \
-              | awk '{print $1}' \
+              | grep "\$REPO_DIR" \
+              | awk '{print \$1}' \
               || true
           )"
 
-          if [ -n "$OLD_PIDS" ]; then
+          if [ -n "\$OLD_PIDS" ]; then
 
               echo "Old bot processes found:"
 
-              echo "$OLD_PIDS"
+              echo "\$OLD_PIDS"
 
-              kill $OLD_PIDS 2>/dev/null || true
+              kill \$OLD_PIDS 2>/dev/null || true
 
               sleep 3
 
-              for PID in $OLD_PIDS; do
+              for PID in \$OLD_PIDS; do
 
-                  if kill -0 "$PID" 2>/dev/null; then
-
-                      kill -9 "$PID" 2>/dev/null || true
-
+                  if kill -0 "\$PID" 2>/dev/null; then
+                      kill -9 "\$PID" 2>/dev/null || true
                   fi
 
               done
@@ -352,45 +411,40 @@ jobs:
 
           # ======================================
           # Start bot
-          # ======================================
+          # ========================================
 
           echo
           echo "========================================"
           echo "STARTING MK AI"
           echo "========================================"
 
-          cd "$REPO_DIR"
+          cd "\$REPO_DIR"
 
           nohup \
-            "$VENV_DIR/bin/python" \
+            "\$VENV_DIR/bin/python" \
             bot.py \
-            > "$LOG_FILE" \
+            > "\$LOG_FILE" \
             2>&1 < /dev/null &
 
-          BOT_PID=$!
+          BOT_PID=\$!
 
-          echo "$BOT_PID" > "$PID_FILE"
+          echo "\$BOT_PID" > "\$PID_FILE"
 
-          echo "Bot PID: $BOT_PID"
+          echo "Bot PID: \$BOT_PID"
 
 
           # ======================================
-          # Wait for startup
-          # ======================================
+          # Check startup
+          # ========================================
 
           sleep 5
-
-
-          # ======================================
-          # Check process
-          # ======================================
 
           echo
           echo "========================================"
           echo "CHECKING MK AI"
           echo "========================================"
 
-          if kill -0 "$BOT_PID" 2>/dev/null; then
+          if kill -0 "\$BOT_PID" 2>/dev/null; then
 
               echo "MK AI process is running."
 
@@ -401,7 +455,7 @@ jobs:
               echo
               echo "===== LAST 100 LOG LINES ====="
 
-              tail -100 "$LOG_FILE" || true
+              tail -100 "\$LOG_FILE" || true
 
               exit 1
 
@@ -409,8 +463,8 @@ jobs:
 
 
           # ======================================
-          # Show process
-          # ======================================
+          # Process
+          # ========================================
 
           echo
           echo "========================================"
@@ -421,20 +475,20 @@ jobs:
 
 
           # ======================================
-          # Show logs
-          # ======================================
+          # Logs
+          # ========================================
 
           echo
           echo "========================================"
           echo "MK AI LOG"
           echo "========================================"
 
-          tail -30 "$LOG_FILE" || true
+          tail -30 "\$LOG_FILE" || true
 
 
           # ======================================
           # Success
-          # ======================================
+          # ========================================
 
           echo
           echo "========================================"
@@ -442,19 +496,15 @@ jobs:
           echo "========================================"
 
           echo "Repository:"
-          echo "$REPO_DIR"
+          echo "\$REPO_DIR"
 
           echo
           echo "Python:"
-          "$VENV_DIR/bin/python" --version
+          "\$VENV_DIR/bin/python" --version
 
           echo
           echo "Bot PID:"
-          echo "$BOT_PID"
-
-          echo
-          echo "Log:"
-          echo "$LOG_FILE"
+          echo "\$BOT_PID"
 
           echo
           echo "The GitHub Action can now finish."
@@ -465,7 +515,7 @@ jobs:
 
 
       # ========================================
-      # Finished
+      # Complete
       # ========================================
 
       - name: Deployment complete
@@ -474,7 +524,5 @@ jobs:
           echo "MK AI DEPLOYMENT COMPLETE"
           echo "========================================"
 
-          echo
-          echo "GitHub Actions job finished."
-
-          echo "The bot remains running on the VPS."
+          echo "The bot is running on the VPS."
+          echo "GitHub Actions can now terminate safely."
