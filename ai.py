@@ -1,179 +1,325 @@
-import json
 import os
-from typing import Optional
-
+import re
+import json
 import httpx
-
-from tools import TOOLS, execute_tool
+from typing import Optional
 
 
 LLAMA_URL = os.getenv(
     "LLAMA_URL",
     "http://127.0.0.1:8080"
-).strip().rstrip("/")
+).strip()
 
-MODEL = os.getenv(
+LLAMA_MODEL = os.getenv(
     "LLAMA_MODEL",
-    "Qwen3-4B"
+    "Qwen3-4B-Q4_K_M.gguf"
 ).strip()
 
 MAX_TOKENS = int(
-    os.getenv(
-        "AI_MAX_TOKENS",
-        "768"
-    )
+    os.getenv("LLAMA_MAX_TOKENS", "512")
 )
 
 TEMPERATURE = float(
-    os.getenv(
-        "AI_TEMPERATURE",
-        "0.35"
-    )
+    os.getenv("LLAMA_TEMPERATURE", "0.3")
 )
 
-TIMEOUT = float(
-    os.getenv(
-        "AI_TIMEOUT",
-        "120"
-    )
-)
+THINKING = os.getenv(
+    "LLAMA_THINKING",
+    "true"
+).lower() in ("1", "true", "yes", "on")
 
-MAX_TOOL_ROUNDS = int(
-    os.getenv(
-        "AI_MAX_TOOL_ROUNDS",
-        "5"
-    )
-)
+WEB_ENABLED = os.getenv(
+    "WEB_SEARCH_ENABLED",
+    "true"
+).lower() in ("1", "true", "yes", "on")
+
+GITHUB_ENABLED = os.getenv(
+    "GITHUB_SEARCH_ENABLED",
+    "true"
+).lower() in ("1", "true", "yes", "on")
 
 
 SYSTEM_PROMPT = """
 أنت Spider AI Assistant داخل Telegram.
 
-أنت Agent حقيقي ولديك أدوات خارجية.
+أنت مساعد عربي ذكي.
 
-الأدوات المتاحة لك:
+القواعد:
 
-1. web_search
-للبحث في الإنترنت.
-
-2. open_url
-لفتح وقراءة صفحات الإنترنت.
-
-3. github_search
-للبحث في GitHub.
-
-4. github_user
-لجلب بيانات GitHub العامة لمستخدم.
-
-5. github_repo
-لجلب بيانات GitHub العامة لمستودع.
-
-قواعد الأدوات:
-
-- إذا قال المستخدم "ابحث في الويب" استخدم web_search.
-- إذا قال "ابحث في GitHub" استخدم github_search.
-- إذا طلب البحث عن شخص أو مشروع، استخدم الأدوات المناسبة.
-- لو السؤال يحتاج Web + GitHub استخدم الاثنين.
-- لا تقل إنك لا تستطيع تصفح الإنترنت طالما الأداة متاحة.
-- بعد استخدام الأدوات، حلل النتائج وأجب المستخدم.
-- لا تخبر المستخدم عن reasoning الداخلي.
-- لا تعرض reasoning_content.
-- لا تخترع نتائج لم تحصل عليها من الأدوات.
-- إذا فشل Tool، وضح ذلك باختصار وحاول Tool آخر إذا كان مناسباً.
-
-أسلوب الرد:
-
-- العربية عند الكلام بالعربية.
-- اللهجة المصرية بشكل طبيعي.
-- محترم دائماً.
+- رد بالمصري بشكل طبيعي عندما المستخدم يتكلم بالمصري.
+- افهم السياق والمحادثة السابقة.
+- لا تكرر كلام المستخدم.
+- لا تقل إنك لا تستطيع الوصول للإنترنت إذا كانت أدوات البحث متاحة.
+- عندما يطلب المستخدم البحث على الويب، استخدم أداة البحث.
+- عندما يطلب البحث في GitHub، استخدم GitHub search.
+- عندما تكون المعلومة حديثة أو تحتاج تحقق، ابحث أولاً.
+- لا تخترع نتائج بحث.
+- إذا وجدت نتيجة، اذكر المعلومات المهمة بوضوح.
+- يمكن استخدام نتائج الويب وGitHub كمصادر للمساعدة في الإجابة.
+- لا تعرض reasoning الداخلي.
 - لا تقل Okay أو Let me check.
-- لا تكرر السؤال.
-- الإجابة النهائية مباشرة.
-- في الأسئلة البسيطة كن مختصراً.
+- أعطِ الإجابة النهائية مباشرة.
 """.strip()
 
 
-async def llama_request(
-    messages,
-    tools=True,
-):
+async def web_search(query: str) -> str:
+
+    if not WEB_ENABLED:
+        return ""
+
+    try:
+
+        url = "https://www.google.com/search"
+
+        params = {
+            "q": query
+        }
+
+        headers = {
+            "User-Agent":
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        }
+
+        async with httpx.AsyncClient(
+            timeout=15,
+            follow_redirects=True
+        ) as client:
+
+            r = await client.get(
+                url,
+                params=params,
+                headers=headers
+            )
+
+            r.raise_for_status()
+
+            text = re.sub(
+                r"<[^>]+>",
+                " ",
+                r.text
+            )
+
+            text = re.sub(
+                r"\s+",
+                " ",
+                text
+            )
+
+            return text[:10000]
+
+    except Exception as e:
+
+        print(
+            "Web search error:",
+            repr(e),
+            flush=True
+        )
+
+        return ""
+
+
+async def github_search(query: str) -> str:
+
+    if not GITHUB_ENABLED:
+        return ""
+
+    try:
+
+        url = "https://api.github.com/search/users"
+
+        params = {
+            "q": query,
+            "per_page": 10
+        }
+
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "MK-AI-Telegram-Bot"
+        }
+
+        async with httpx.AsyncClient(
+            timeout=15
+        ) as client:
+
+            r = await client.get(
+                url,
+                params=params,
+                headers=headers
+            )
+
+            r.raise_for_status()
+
+            data = r.json()
+
+            results = []
+
+            for item in data.get("items", []):
+
+                results.append({
+                    "login": item.get("login"),
+                    "html_url": item.get("html_url"),
+                    "type": item.get("type"),
+                })
+
+            return json.dumps(
+                results,
+                ensure_ascii=False,
+                indent=2
+            )
+
+    except Exception as e:
+
+        print(
+            "GitHub search error:",
+            repr(e),
+            flush=True
+        )
+
+        return ""
+
+
+async def llama_chat(
+    messages: list,
+    think: bool = True
+) -> str:
 
     payload = {
-        "model": MODEL,
+        "model": LLAMA_MODEL,
         "messages": messages,
+
         "temperature": TEMPERATURE,
-        "top_p": 0.8,
         "max_tokens": MAX_TOKENS,
+
         "stream": False,
+
+        "think": think,
     }
 
-    if tools:
-        payload["tools"] = TOOLS
-        payload["tool_choice"] = "auto"
-
-    timeout = httpx.Timeout(
-        connect=5.0,
-        read=TIMEOUT,
-        write=15.0,
-        pool=10.0,
-    )
-
     async with httpx.AsyncClient(
-        timeout=timeout
+        timeout=httpx.Timeout(
+            connect=10,
+            read=180,
+            write=30,
+            pool=10
+        )
     ) as client:
 
         response = await client.post(
             f"{LLAMA_URL}/v1/chat/completions",
-            json=payload,
+            json=payload
         )
 
         response.raise_for_status()
 
-        return response.json()
+        data = response.json()
 
+        choice = (
+            data.get("choices") or [{}]
+        )[0]
 
-def clean_answer(
-    content: str
-):
+        message = choice.get(
+            "message"
+        ) or {}
 
-    if not content:
-        return ""
+        content = message.get(
+            "content",
+            ""
+        )
 
-    content = str(content).strip()
+        # Some llama.cpp/Qwen configurations
+        # return reasoning separately.
+        if not content:
 
-    if "<think>" in content:
+            content = message.get(
+                "reasoning_content",
+                ""
+            )
 
-        if "</think>" in content:
+        if not isinstance(content, str):
+            content = str(content)
 
-            content = content.split(
-                "</think>",
-                1
-            )[1].strip()
-
-        else:
-
-            content = ""
-
-    return content.strip()
+        return content.strip()
 
 
 async def ask_ai(
     prompt: str,
-    history: Optional[list] = None,
+    history: Optional[list] = None
 ) -> str:
 
     prompt = str(prompt).strip()
 
+    context = []
+
+    # ==================================
+    # SEARCH INTENT
+    # ==================================
+
+    lower = prompt.lower()
+
+    wants_github = (
+        "github" in lower
+        or "جيت هب" in lower
+        or "حساب" in lower and (
+            "dev" in lower
+            or "developer" in lower
+        )
+    )
+
+    wants_web = any(
+        x in lower
+        for x in [
+            "ابحث",
+            "دور",
+            "شوف على النت",
+            "الويب",
+            "internet",
+            "search",
+            "find",
+            "latest",
+            "github"
+        ]
+    )
+
+    # ==================================
+    # GITHUB SEARCH
+    # ==================================
+
+    if wants_github:
+
+        result = await github_search(prompt)
+
+        if result:
+
+            context.append(
+                "\nنتائج GitHub:\n"
+                + result
+            )
+
+    # ==================================
+    # WEB SEARCH
+    # ==================================
+
+    elif wants_web:
+
+        result = await web_search(prompt)
+
+        if result:
+
+            context.append(
+                "\nنتائج الويب:\n"
+                + result
+            )
+
+    # ==================================
+    # MESSAGES
+    # ==================================
+
     messages = [
         {
             "role": "system",
-            "content": SYSTEM_PROMPT,
+            "content": SYSTEM_PROMPT
         }
     ]
-
-    # --------------------------------------------------------
-    # HISTORY
-    # --------------------------------------------------------
 
     if history:
 
@@ -185,243 +331,66 @@ async def ask_ai(
             role = msg.get("role")
             content = msg.get("content")
 
-            if role not in (
+            if role in (
                 "user",
                 "assistant"
-            ):
-                continue
-
-            if not isinstance(
+            ) and isinstance(
                 content,
                 str
             ):
-                continue
 
-            content = clean_answer(
-                content
-            )
+                messages.append({
+                    "role": role,
+                    "content": content
+                })
 
-            if not content:
-                continue
+    final_prompt = prompt
 
-            messages.append({
-                "role": role,
-                "content": content,
-            })
+    if context:
+
+        final_prompt += (
+            "\n\n"
+            "استخدم نتائج البحث التالية للتحقق "
+            "من المعلومات:\n"
+            + "\n".join(context)
+        )
 
     messages.append({
         "role": "user",
-        "content": prompt,
+        "content": final_prompt
     })
 
-    # --------------------------------------------------------
-    # AGENT LOOP
-    # --------------------------------------------------------
+    # ==================================
+    # LOCAL QWEN3 THINKING
+    # ==================================
 
-    for round_number in range(
-        MAX_TOOL_ROUNDS
-    ):
+    try:
 
-        try:
-
-            data = await llama_request(
-                messages,
-                tools=True,
-            )
-
-        except Exception as error:
-
-            print(
-                "[LLAMA ERROR]",
-                repr(error),
-                flush=True,
-            )
-
-            return (
-                "❌ حصل خطأ في الـAI. "
-                "جرب تاني بعد شوية."
-            )
-
-        choices = (
-            data.get("choices")
-            or []
+        answer = await llama_chat(
+            messages,
+            think=THINKING
         )
 
-        if not choices:
+        if answer:
+            return answer
 
-            return (
-                "❌ الـAI رجّع نتيجة فاضية."
-            )
+    except Exception as e:
 
-        message = (
-            choices[0].get("message")
-            or {}
+        print(
+            "llama.cpp error:",
+            repr(e),
+            flush=True
         )
-
-        content = message.get(
-            "content",
-            ""
-        )
-
-        tool_calls = (
-            message.get(
-                "tool_calls"
-            )
-            or []
-        )
-
-        # ----------------------------------------------------
-        # NO TOOL CALL
-        # ----------------------------------------------------
-
-        if not tool_calls:
-
-            answer = clean_answer(
-                content
-            )
-
-            if answer:
-
-                return answer
-
-            # Sometimes model can return
-            # reasoning only. Ask for final answer.
-            messages.append({
-                "role": "assistant",
-                "content": (
-                    "أعطِ الإجابة النهائية فقط "
-                    "بدون reasoning."
-                ),
-            })
-
-            continue
-
-        # ----------------------------------------------------
-        # ASSISTANT TOOL MESSAGE
-        # ----------------------------------------------------
-
-        assistant_message = {
-            "role": "assistant",
-            "content": content or "",
-            "tool_calls": tool_calls,
-        }
-
-        messages.append(
-            assistant_message
-        )
-
-        # ----------------------------------------------------
-        # EXECUTE TOOLS
-        # ----------------------------------------------------
-
-        for tool_call in tool_calls:
-
-            function = (
-                tool_call.get(
-                    "function"
-                )
-                or {}
-            )
-
-            name = function.get(
-                "name"
-            )
-
-            raw_arguments = (
-                function.get(
-                    "arguments",
-                    "{}"
-                )
-            )
-
-            try:
-
-                if isinstance(
-                    raw_arguments,
-                    str
-                ):
-
-                    arguments = json.loads(
-                        raw_arguments
-                    )
-
-                else:
-
-                    arguments = raw_arguments
-
-            except Exception as error:
-
-                result = {
-                    "error": (
-                        "Invalid tool arguments: "
-                        + repr(error)
-                    )
-                }
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.get(
-                        "id",
-                        ""
-                    ),
-                    "content": json.dumps(
-                        result,
-                        ensure_ascii=False
-                    ),
-                })
-
-                continue
-
-            print(
-                "[TOOL]",
-                name,
-                arguments,
-                flush=True,
-            )
-
-            try:
-
-                result = await execute_tool(
-                    name,
-                    arguments,
-                )
-
-            except Exception as error:
-
-                result = {
-                    "error": str(error)
-                }
-
-            result_text = json.dumps(
-                result,
-                ensure_ascii=False
-            )
-
-            # Avoid huge context
-            if len(result_text) > 24000:
-                result_text = (
-                    result_text[:24000]
-                    + "\n...[truncated]"
-                )
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.get(
-                    "id",
-                    ""
-                ),
-                "content": result_text,
-            })
 
     return (
-        "❌ وصلت للحد الأقصى من عمليات البحث "
-        "في نفس الطلب. جرّب السؤال بشكل أبسط."
+        "❌ حصلت مشكلة في الـ AI المحلي. "
+        "اتأكد إن llama-server شغال."
     )
 
 
 async def generate_response(
     prompt: str,
-    history: Optional[list] = None,
+    history: Optional[list] = None
 ) -> str:
 
     return await ask_ai(
@@ -432,7 +401,7 @@ async def generate_response(
 
 async def chat(
     prompt: str,
-    history: Optional[list] = None,
+    history: Optional[list] = None
 ) -> str:
 
     return await ask_ai(
@@ -445,14 +414,9 @@ def get_model_info():
 
     return {
         "provider": "llama.cpp",
-        "model": MODEL,
         "url": LLAMA_URL,
-        "thinking": True,
-        "tools": [
-            "web_search",
-            "open_url",
-            "github_search",
-            "github_user",
-            "github_repo",
-        ],
+        "model": LLAMA_MODEL,
+        "thinking": THINKING,
+        "web_search": WEB_ENABLED,
+        "github_search": GITHUB_ENABLED
     }
