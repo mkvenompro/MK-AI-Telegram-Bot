@@ -2,432 +2,73 @@ name: MK AI Telegram Bot
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
-
-  diagnose-telegram:
-    name: Diagnose Telegram API
+  bot:
     runs-on: ubuntu-latest
 
-    env:
-      TEST_TELEGRAM_TOKEN: ${{ secrets.TEST_TELEGRAM_TOKEN }}
+    timeout-minutes: 360
 
     steps:
-
-      - name: System information
-        run: |
-          echo "========================================"
-          echo "SYSTEM INFORMATION"
-          echo "========================================"
-
-          uname -a
-          echo
-
-          cat /etc/os-release
-          echo
-
-          date -u
-
-      - name: DNS diagnostic
-        run: |
-          echo
-          echo "========================================"
-          echo "DNS DIAGNOSTIC"
-          echo "========================================"
-
-          echo "--- getent ---"
-          getent hosts api.telegram.org || true
-
-          echo
-          echo "--- IPv4 ---"
-          getent ahostsv4 api.telegram.org || true
-
-          echo
-          echo "--- IPv6 ---"
-          getent ahostsv6 api.telegram.org || true
-
-          echo
-          echo "--- nslookup ---"
-          nslookup api.telegram.org || true
-
-          echo
-          echo "--- dig A ---"
-          dig api.telegram.org A || true
-
-          echo
-          echo "--- dig AAAA ---"
-          dig api.telegram.org AAAA || true
-
-      - name: TCP 443 test
-        run: |
-          echo
-          echo "========================================"
-          echo "TCP 443 TEST"
-          echo "========================================"
-
-          IP=$(getent ahostsv4 api.telegram.org | awk 'NR==1 {print $1}')
-
-          echo "IPv4: $IP"
-
-          if [ -n "$IP" ]; then
-            timeout 15 bash -c "</dev/tcp/$IP/443" \
-              && echo "TCP IPv4 443: OPEN" \
-              || echo "TCP IPv4 443: FAILED"
-          fi
-
-      - name: HTTPS IPv4 test
-        run: |
-          echo
-          echo "========================================"
-          echo "HTTPS IPv4"
-          echo "========================================"
-
-          curl \
-            -4 \
-            -v \
-            --connect-timeout 10 \
-            --max-time 30 \
-            https://api.telegram.org/ \
-            2>&1 || true
-
-      - name: HTTPS IPv6 test
-        run: |
-          echo
-          echo "========================================"
-          echo "HTTPS IPv6"
-          echo "========================================"
-
-          curl \
-            -6 \
-            -v \
-            --connect-timeout 10 \
-            --max-time 30 \
-            https://api.telegram.org/ \
-            2>&1 || true
-
-      - name: TLS test
-        run: |
-          echo
-          echo "========================================"
-          echo "TLS TEST"
-          echo "========================================"
-
-          timeout 30 openssl s_client \
-            -connect api.telegram.org:443 \
-            -servername api.telegram.org \
-            </dev/null \
-            2>&1 || true
-
-      - name: Telegram API test
-        run: |
-          echo
-          echo "========================================"
-          echo "TEST TELEGRAM API"
-          echo "========================================"
-
-          if [ -z "$TEST_TELEGRAM_TOKEN" ]; then
-            echo "ERROR: TEST_TELEGRAM_TOKEN is missing."
-            exit 1
-          fi
-
-          echo "Secret detected."
-          echo "Token will NOT be printed."
-
-          URL="https://api.telegram.org/bot${TEST_TELEGRAM_TOKEN}/getMe"
-
-          echo
-          echo "--- IPv4 Telegram API ---"
-
-          curl \
-            -4 \
-            -sS \
-            -D /tmp/headers \
-            -o /tmp/response \
-            --connect-timeout 15 \
-            --max-time 45 \
-            "$URL"
-
-          RESULT=$?
-
-          echo
-          echo "curl exit code: $RESULT"
-
-          echo
-          echo "HTTP headers:"
-          cat /tmp/headers 2>/dev/null || true
-
-          echo
-          echo "Telegram response:"
-
-          sed -E \
-            's/[0-9]{8,12}:[A-Za-z0-9_-]{20,}/[TOKEN-REDACTED]/g' \
-            /tmp/response 2>/dev/null || true
-
-          echo
-          echo "--- IPv6 Telegram API ---"
-
-          curl \
-            -6 \
-            -sS \
-            --connect-timeout 15 \
-            --max-time 30 \
-            "$URL" \
-            2>&1 || true
-
-      - name: Telegram API without token
-        run: |
-          echo
-          echo "========================================"
-          echo "TELEGRAM SERVER TEST"
-          echo "========================================"
-
-          echo "--- IPv4 ---"
-
-          curl \
-            -4 \
-            -I \
-            -v \
-            --connect-timeout 10 \
-            --max-time 30 \
-            https://api.telegram.org/ \
-            2>&1 || true
-
-          echo
-          echo "--- IPv6 ---"
-
-          curl \
-            -6 \
-            -I \
-            -v \
-            --connect-timeout 10 \
-            --max-time 30 \
-            https://api.telegram.org/ \
-            2>&1 || true
-
-      - name: Traceroute
-        run: |
-          echo
-          echo "========================================"
-          echo "NETWORK ROUTE"
-          echo "========================================"
-
-          sudo apt-get update -qq
-          sudo apt-get install -y traceroute -qq
-
-          echo
-          echo "--- UDP/ICMP traceroute ---"
-
-          traceroute \
-            -4 \
-            -n \
-            -m 15 \
-            -w 2 \
-            api.telegram.org || true
-
-          echo
-          echo "--- TCP 443 traceroute ---"
-
-          traceroute \
-            -4 \
-            -T \
-            -p 443 \
-            -n \
-            -m 15 \
-            -w 2 \
-            api.telegram.org || true
-
-      - name: Diagnostic finished
-        run: |
-          echo
-          echo "========================================"
-          echo "DIAGNOSTIC FINISHED"
-          echo "========================================"
-          echo
-          echo "Send the complete log."
-          echo "DO NOT send any token."
-  diagnose:
-    runs-on: ubuntu-latest
-
-    steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: System information
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
         run: |
-          echo "========================================"
-          echo "SYSTEM"
-          echo "========================================"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-          uname -a
-
-          echo ""
-          echo "Runner:"
-          echo "$RUNNER_OS"
-
-          echo ""
-          echo "Public IP:"
-          curl -4 --max-time 10 https://api.ipify.org || true
-
-          echo ""
-
-      - name: DNS diagnostic
-        run: |
-          echo "========================================"
-          echo "DNS DIAGNOSTIC"
-          echo "========================================"
-
-          echo ""
-          echo "--- getent hosts ---"
-          getent hosts api.telegram.org || true
-
-          echo ""
-          echo "--- IPv4 ---"
-          getent ahostsv4 api.telegram.org || true
-
-          echo ""
-          echo "--- IPv6 ---"
-          getent ahostsv6 api.telegram.org || true
-
-          echo ""
-          echo "--- resolv.conf ---"
-          cat /etc/resolv.conf
-
-      - name: Test IPv4 Telegram
-        run: |
-          echo "========================================"
-          echo "TELEGRAM IPv4"
-          echo "========================================"
-
-          curl -4 \
-            -v \
-            --connect-timeout 10 \
-            --max-time 20 \
-            https://api.telegram.org/ \
-            || true
-
-      - name: Test IPv6 Telegram
-        run: |
-          echo "========================================"
-          echo "TELEGRAM IPv6"
-          echo "========================================"
-
-          curl -6 \
-            -v \
-            --connect-timeout 10 \
-            --max-time 20 \
-            https://api.telegram.org/ \
-            || true
-
-      - name: Test Telegram TLS
-        run: |
-          echo "========================================"
-          echo "TLS TEST"
-          echo "========================================"
-
-          timeout 20 openssl s_client \
-            -connect api.telegram.org:443 \
-            -servername api.telegram.org \
-            </dev/null \
-            || true
-
-      - name: Test Telegram HTTP
+      - name: Check configuration
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          echo "========================================"
-          echo "TELEGRAM getMe"
-          echo "========================================"
-
-          curl -4 \
-            -v \
-            --connect-timeout 10 \
-            --max-time 20 \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" \
-            || true
-
-      - name: Test Telegram through IP
-        run: |
-          echo "========================================"
-          echo "TELEGRAM IP TEST"
-          echo "========================================"
-
-          IP=$(getent ahostsv4 api.telegram.org | awk 'NR==1 {print $1}')
-
-          echo "Resolved IPv4:"
-          echo "$IP"
-
-          if [ -n "$IP" ]; then
-
-            curl -4 \
-              -v \
-              --connect-timeout 10 \
-              --max-time 20 \
-              --resolve api.telegram.org:443:$IP \
-              https://api.telegram.org/ \
-              || true
-
-          else
-
-            echo "No IPv4 address found."
-
+          if [ -z "$BOT_TOKEN" ]; then
+            echo "::error::BOT_TOKEN secret is missing."
+            exit 1
           fi
 
-      - name: Test port 443
+          echo "BOT_TOKEN secret is present."
+
+      - name: Test Telegram API
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          echo "========================================"
-          echo "PORT 443"
-          echo "========================================"
+          echo "Testing Telegram API..."
 
-          IP=$(getent ahostsv4 api.telegram.org | awk 'NR==1 {print $1}')
+          python - <<'PY'
+          import os
+          import urllib.request
+          import urllib.error
 
-          echo "Testing:"
-          echo "$IP:443"
+          token = os.environ["BOT_TOKEN"]
 
-          if [ -n "$IP" ]; then
-            timeout 10 bash -c \
-              "</dev/tcp/$IP/443" \
-              && echo "TCP 443 OPEN" \
-              || echo "TCP 443 FAILED"
-          fi
+          url = f"https://api.telegram.org/bot{token}/getMe"
 
-      - name: Trace route
+          try:
+              with urllib.request.urlopen(url, timeout=20) as r:
+                  data = r.read().decode()
+                  print("Telegram API HTTP:", r.status)
+                  print("Telegram API reachable.")
+                  print("Response received:", data[:500])
+
+          except Exception as e:
+              print("Telegram API connection failed:")
+              print(type(e).__name__, str(e))
+              raise
+          PY
+
+      - name: Run bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          echo "========================================"
-          echo "NETWORK ROUTE"
-          echo "========================================"
-
-          if command -v traceroute >/dev/null 2>&1; then
-
-            traceroute \
-              -4 \
-              -m 15 \
-              -w 2 \
-              api.telegram.org \
-              || true
-
-          else
-
-            echo "Installing traceroute..."
-
-            sudo apt-get update -qq
-            sudo apt-get install -y traceroute -qq
-
-            traceroute \
-              -4 \
-              -m 15 \
-              -w 2 \
-              api.telegram.org \
-              || true
-
-          fi
-
-      - name: Final summary
-        run: |
-          echo ""
-          echo "========================================"
-          echo "DIAGNOSTIC FINISHED"
-          echo "========================================"
-          echo ""
-          echo "Send the complete log back here."
-          echo "Do NOT send your Telegram token."
+          python bot.py
