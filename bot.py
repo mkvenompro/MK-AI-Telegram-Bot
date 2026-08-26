@@ -143,10 +143,34 @@ async def post_init(application):
     logger.info('Bot started: @%s', BOT_USERNAME)
 
 def main():
+    from telegram.request import HTTPXRequest
+
+    telegram_request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=30.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        pool_timeout=30.0,
+    )
+
+    updates_request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=30.0,
+        read_timeout=90.0,
+        write_timeout=60.0,
+        pool_timeout=30.0,
+    )
+
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .post_init(post_init)
+        .request(telegram_request)
+        .get_updates_request(updates_request)
+        .get_updates_connect_timeout(30.0)
+        .get_updates_read_timeout(90.0)
+        .get_updates_write_timeout(60.0)
+        .get_updates_pool_timeout(30.0)
         .build()
     )
 
