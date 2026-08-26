@@ -12,7 +12,7 @@ jobs:
 
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      AI_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      AI_API_KEY: ${{ secrets.AI_API_KEY }}
       AI_API_URL: https://api.groq.com/openai/v1/chat/completions
       AI_MODEL: openai/gpt-oss-120b
 
@@ -24,25 +24,13 @@ jobs:
         run: |
           set -eux
 
-          echo "========================================"
-          echo "FORCING TELEGRAM API TO IPv4"
-          echo "========================================"
-
           TELEGRAM_IPV4="149.154.166.110"
 
           sudo sed -i '/api\.telegram\.org/d' /etc/hosts || true
           echo "$TELEGRAM_IPV4 api.telegram.org" | sudo tee -a /etc/hosts
 
-          echo
-          echo "Hosts:"
-          grep "api.telegram.org" /etc/hosts || true
-
-          echo
-          echo "DNS:"
+          echo "Telegram IPv4: $TELEGRAM_IPV4"
           getent hosts api.telegram.org || true
-
-          echo
-          echo "Testing HTTPS over IPv4..."
 
           curl -4 \
             --connect-timeout 10 \
@@ -52,7 +40,6 @@ jobs:
             https://api.telegram.org/ \
             -o /tmp/telegram_test.html
 
-          echo
           echo "Telegram IPv4 connection: OK"
 
       - name: Configure Python networking
@@ -82,27 +69,25 @@ jobs:
       - name: Check configuration
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
         run: |
           if [ -z "$BOT_TOKEN" ]; then
             echo "::error::BOT_TOKEN secret is missing."
             exit 1
           fi
 
-          if [ -z "$GROQ_API_KEY" ]; then
-            echo "::error::GROQ_API_KEY secret is missing."
+          if [ -z "$AI_API_KEY" ]; then
+            echo "::error::AI_API_KEY secret is missing."
             exit 1
           fi
 
           echo "BOT_TOKEN secret is present."
-          echo "GROQ_API_KEY secret is present."
+          echo "AI_API_KEY secret is present."
 
       - name: Test Telegram API
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          echo "Testing Telegram API..."
-
           python - <<'PY'
           import os
           import urllib.request
@@ -110,58 +95,23 @@ jobs:
           token = os.environ["BOT_TOKEN"]
           url = f"https://api.telegram.org/bot{token}/getMe"
 
-          with urllib.request.urlopen(url, timeout=20) as r:
-              data = r.read().decode()
-              print("Telegram API HTTP:", r.status)
-              print("Telegram API reachable.")
-              print("Response received:", data[:500])
-          PY
-
-      - name: Test Groq API
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: |
-          echo "Testing Groq API..."
-
-          python - <<'PY'
-          import os
-          import urllib.request
-          import json
-
-          key = os.environ["GROQ_API_KEY"]
-
-          url = "https://api.groq.com/openai/v1/models"
-
-          request = urllib.request.Request(
-              url,
-              headers={
-                  "Authorization": f"Bearer {key}",
-                  "Content-Type": "application/json",
-              },
-          )
-
-          with urllib.request.urlopen(request, timeout=30) as r:
-              data = r.read().decode()
-              print("Groq API HTTP:", r.status)
-              print("Groq API reachable.")
-              print("Models response received.")
+          try:
+              with urllib.request.urlopen(url, timeout=20) as r:
+                  data = r.read().decode()
+                  print("Telegram API HTTP:", r.status)
+                  print("Telegram API reachable.")
+                  print("Response:", data[:500])
+          except Exception as e:
+              print("Telegram API connection failed:")
+              print(type(e).__name__, str(e))
+              raise
           PY
 
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          AI_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_API_URL: https://api.groq.com/openai/v1/chat/completions
           AI_MODEL: openai/gpt-oss-120b
         run: |
-          echo "========================================"
-          echo "STARTING MK AI TELEGRAM BOT"
-          echo "========================================"
-          echo "Provider: Groq"
-          echo "Model: $AI_MODEL"
-          echo "Endpoint: $AI_API_URL"
-          echo "========================================"
-
           python bot.py
