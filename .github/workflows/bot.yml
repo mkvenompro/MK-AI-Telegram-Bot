@@ -13,8 +13,8 @@ jobs:
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       AI_API_KEY: ${{ secrets.AI_API_KEY }}
-      AI_API_URL: https://api.groq.com/openai/v1/chat/completions
-      AI_MODEL: openai/gpt-oss-120b
+      AI_API_URL: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+      AI_MODEL: gemini-2.5-flash
 
     timeout-minutes: 360
 
@@ -111,7 +111,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          AI_API_URL: https://api.groq.com/openai/v1/chat/completions
-          AI_MODEL: openai/gpt-oss-120b
+          AI_API_URL: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+          AI_MODEL: gemini-2.5-flash
         run: |
           python bot.py
