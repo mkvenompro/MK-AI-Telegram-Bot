@@ -185,7 +185,7 @@ def main():
 
     logger.info('Starting Telegram polling...')
 
-    application.run_polling()
+    application.run_polling(drop_pending_updates=True,poll_interval=1.0,close_loop=True)
 
 if __name__ == '__main__':
     main()
