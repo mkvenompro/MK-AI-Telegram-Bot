@@ -1,21 +1,20 @@
+import json
 import os
 from typing import Optional
 
 import httpx
 
+from tools import TOOLS, execute_tool
 
-# ============================================================
-# LLAMA.CPP CONFIG
-# ============================================================
 
 LLAMA_URL = os.getenv(
     "LLAMA_URL",
     "http://127.0.0.1:8080"
 ).strip().rstrip("/")
 
-LLAMA_MODEL = os.getenv(
+MODEL = os.getenv(
     "LLAMA_MODEL",
-    "Qwen3-4B-Q4_K_M.gguf"
+    "Qwen3-4B"
 ).strip()
 
 MAX_TOKENS = int(
@@ -28,14 +27,7 @@ MAX_TOKENS = int(
 TEMPERATURE = float(
     os.getenv(
         "AI_TEMPERATURE",
-        "0.4"
-    )
-)
-
-TOP_P = float(
-    os.getenv(
-        "AI_TOP_P",
-        "0.8"
+        "0.35"
     )
 )
 
@@ -46,152 +38,88 @@ TIMEOUT = float(
     )
 )
 
+MAX_TOOL_ROUNDS = int(
+    os.getenv(
+        "AI_MAX_TOOL_ROUNDS",
+        "5"
+    )
+)
 
-# ============================================================
-# SYSTEM PROMPT
-# ============================================================
 
 SYSTEM_PROMPT = """
 أنت Spider AI Assistant داخل Telegram.
 
-القواعد المهمة:
+أنت Agent حقيقي ولديك أدوات خارجية.
 
-- أجب مباشرة على سؤال المستخدم.
-- إذا كان المستخدم يتكلم بالعربية، استخدم العربية.
-- في الكلام العادي استخدم اللهجة المصرية بشكل طبيعي.
-- كن محترماً حتى لو المستخدم بيتكلم بعصبية أو هزار.
-- لا تكرر كلام المستخدم بدون سبب.
-- لا تبدأ الرد بكلمات مثل:
-  Okay
-  Sure
-  Let me check
-  I understand
-- لا تعرض reasoning أو التفكير الداخلي للمستخدم.
-- فكّر داخلياً قبل الإجابة عندما يكون السؤال يحتاج تحليلاً.
-- بعد التفكير أعطِ النتيجة النهائية فقط.
-- الأسئلة البسيطة يكون ردها قصيراً.
-- لا تتفلسف في الأسئلة البسيطة.
-- لا تخترع معلومات.
-- إذا لم تكن متأكداً، قل إنك غير متأكد.
+الأدوات المتاحة لك:
+
+1. web_search
+للبحث في الإنترنت.
+
+2. open_url
+لفتح وقراءة صفحات الإنترنت.
+
+3. github_search
+للبحث في GitHub.
+
+4. github_user
+لجلب بيانات GitHub العامة لمستخدم.
+
+5. github_repo
+لجلب بيانات GitHub العامة لمستودع.
+
+قواعد الأدوات:
+
+- إذا قال المستخدم "ابحث في الويب" استخدم web_search.
+- إذا قال "ابحث في GitHub" استخدم github_search.
+- إذا طلب البحث عن شخص أو مشروع، استخدم الأدوات المناسبة.
+- لو السؤال يحتاج Web + GitHub استخدم الاثنين.
+- لا تقل إنك لا تستطيع تصفح الإنترنت طالما الأداة متاحة.
+- بعد استخدام الأدوات، حلل النتائج وأجب المستخدم.
+- لا تخبر المستخدم عن reasoning الداخلي.
+- لا تعرض reasoning_content.
+- لا تخترع نتائج لم تحصل عليها من الأدوات.
+- إذا فشل Tool، وضح ذلك باختصار وحاول Tool آخر إذا كان مناسباً.
+
+أسلوب الرد:
+
+- العربية عند الكلام بالعربية.
+- اللهجة المصرية بشكل طبيعي.
+- محترم دائماً.
+- لا تقل Okay أو Let me check.
+- لا تكرر السؤال.
+- الإجابة النهائية مباشرة.
+- في الأسئلة البسيطة كن مختصراً.
 """.strip()
 
 
-# ============================================================
-# EXTRACT FINAL ANSWER
-# ============================================================
-
-def extract_final_content(message: dict) -> str:
-    """
-    llama.cpp with reasoning-format=deepseek normally returns:
-
-    {
-        "content": "...",
-        "reasoning_content": "..."
-    }
-
-    We ONLY return content.
-
-    Also handles models/configurations that put
-    <think>...</think> directly inside content.
-    """
-
-    content = message.get("content")
-
-    if content is None:
-        content = ""
-
-    if not isinstance(content, str):
-        content = str(content)
-
-    content = content.strip()
-
-    # Handle raw <think> blocks just in case
-    if "<think>" in content and "</think>" in content:
-        after = content.split("</think>", 1)[1]
-        content = after.strip()
-
-    # Remove an unfinished thinking prefix
-    if content.startswith("<think>"):
-        content = content.replace("<think>", "", 1).strip()
-
-    return content
-
-
-# ============================================================
-# LLAMA.CPP REQUEST
-# ============================================================
-
-async def _llama_chat(
-    messages: list,
-    timeout: float = TIMEOUT,
-) -> str:
-
-    clean_messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        }
-    ]
-
-    for msg in messages[-8:]:
-
-        if not isinstance(msg, dict):
-            continue
-
-        role = msg.get("role")
-        content = msg.get("content")
-
-        if role not in ("user", "assistant"):
-            continue
-
-        if not isinstance(content, str):
-            continue
-
-        content = content.strip()
-
-        if not content:
-            continue
-
-        # Never send internal reasoning back into history
-        if role == "assistant":
-
-            if "<think>" in content:
-                if "</think>" in content:
-                    content = content.split(
-                        "</think>",
-                        1
-                    )[1].strip()
-                else:
-                    continue
-
-        clean_messages.append(
-            {
-                "role": role,
-                "content": content,
-            }
-        )
+async def llama_request(
+    messages,
+    tools=True,
+):
 
     payload = {
-        "model": LLAMA_MODEL,
-        "messages": clean_messages,
-
-        # llama.cpp OpenAI-compatible endpoint
-        "stream": False,
-
+        "model": MODEL,
+        "messages": messages,
         "temperature": TEMPERATURE,
-        "top_p": TOP_P,
+        "top_p": 0.8,
         "max_tokens": MAX_TOKENS,
+        "stream": False,
     }
 
-    timeout_config = httpx.Timeout(
+    if tools:
+        payload["tools"] = TOOLS
+        payload["tool_choice"] = "auto"
+
+    timeout = httpx.Timeout(
         connect=5.0,
-        read=timeout,
-        write=10.0,
+        read=TIMEOUT,
+        write=15.0,
         pool=10.0,
     )
 
     async with httpx.AsyncClient(
-        timeout=timeout_config
+        timeout=timeout
     ) as client:
 
         response = await client.post(
@@ -201,38 +129,33 @@ async def _llama_chat(
 
         response.raise_for_status()
 
-        data = response.json()
-
-        choices = data.get("choices") or []
-
-        if not choices:
-            raise RuntimeError(
-                f"llama.cpp returned no choices: {data}"
-            )
-
-        message = choices[0].get("message") or {}
-
-        answer = extract_final_content(message)
-
-        if not answer:
-
-            reasoning = message.get(
-                "reasoning_content",
-                ""
-            )
-
-            raise RuntimeError(
-                "llama.cpp returned reasoning but no "
-                "final answer. Increase AI_MAX_TOKENS. "
-                f"reasoning_chars={len(str(reasoning))}"
-            )
-
-        return answer
+        return response.json()
 
 
-# ============================================================
-# PUBLIC AI FUNCTION
-# ============================================================
+def clean_answer(
+    content: str
+):
+
+    if not content:
+        return ""
+
+    content = str(content).strip()
+
+    if "<think>" in content:
+
+        if "</think>" in content:
+
+            content = content.split(
+                "</think>",
+                1
+            )[1].strip()
+
+        else:
+
+            content = ""
+
+    return content.strip()
+
 
 async def ask_ai(
     prompt: str,
@@ -241,10 +164,16 @@ async def ask_ai(
 
     prompt = str(prompt).strip()
 
-    if not prompt:
-        return "اكتبلي سؤالك الأول 😄"
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT,
+        }
+    ]
 
-    messages = []
+    # --------------------------------------------------------
+    # HISTORY
+    # --------------------------------------------------------
 
     if history:
 
@@ -256,54 +185,238 @@ async def ask_ai(
             role = msg.get("role")
             content = msg.get("content")
 
-            if role not in ("user", "assistant"):
+            if role not in (
+                "user",
+                "assistant"
+            ):
                 continue
 
-            if not isinstance(content, str):
+            if not isinstance(
+                content,
+                str
+            ):
                 continue
 
-            content = content.strip()
+            content = clean_answer(
+                content
+            )
 
             if not content:
                 continue
 
-            messages.append(
-                {
-                    "role": role,
-                    "content": content,
-                }
+            messages.append({
+                "role": role,
+                "content": content,
+            })
+
+    messages.append({
+        "role": "user",
+        "content": prompt,
+    })
+
+    # --------------------------------------------------------
+    # AGENT LOOP
+    # --------------------------------------------------------
+
+    for round_number in range(
+        MAX_TOOL_ROUNDS
+    ):
+
+        try:
+
+            data = await llama_request(
+                messages,
+                tools=True,
             )
 
-    # Prevent duplicate current message
-    if (
-        not messages
-        or messages[-1].get("content") != prompt
-    ):
+        except Exception as error:
+
+            print(
+                "[LLAMA ERROR]",
+                repr(error),
+                flush=True,
+            )
+
+            return (
+                "❌ حصل خطأ في الـAI. "
+                "جرب تاني بعد شوية."
+            )
+
+        choices = (
+            data.get("choices")
+            or []
+        )
+
+        if not choices:
+
+            return (
+                "❌ الـAI رجّع نتيجة فاضية."
+            )
+
+        message = (
+            choices[0].get("message")
+            or {}
+        )
+
+        content = message.get(
+            "content",
+            ""
+        )
+
+        tool_calls = (
+            message.get(
+                "tool_calls"
+            )
+            or []
+        )
+
+        # ----------------------------------------------------
+        # NO TOOL CALL
+        # ----------------------------------------------------
+
+        if not tool_calls:
+
+            answer = clean_answer(
+                content
+            )
+
+            if answer:
+
+                return answer
+
+            # Sometimes model can return
+            # reasoning only. Ask for final answer.
+            messages.append({
+                "role": "assistant",
+                "content": (
+                    "أعطِ الإجابة النهائية فقط "
+                    "بدون reasoning."
+                ),
+            })
+
+            continue
+
+        # ----------------------------------------------------
+        # ASSISTANT TOOL MESSAGE
+        # ----------------------------------------------------
+
+        assistant_message = {
+            "role": "assistant",
+            "content": content or "",
+            "tool_calls": tool_calls,
+        }
+
         messages.append(
-            {
-                "role": "user",
-                "content": prompt,
-            }
+            assistant_message
         )
 
-    try:
+        # ----------------------------------------------------
+        # EXECUTE TOOLS
+        # ----------------------------------------------------
 
-        return await _llama_chat(
-            messages
-        )
+        for tool_call in tool_calls:
 
-    except Exception as error:
+            function = (
+                tool_call.get(
+                    "function"
+                )
+                or {}
+            )
 
-        print(
-            "llama.cpp error:",
-            repr(error),
-            flush=True,
-        )
+            name = function.get(
+                "name"
+            )
 
-        return (
-            "❌ حصل خطأ في الـAI دلوقتي، "
-            "جرب تاني بعد شوية."
-        )
+            raw_arguments = (
+                function.get(
+                    "arguments",
+                    "{}"
+                )
+            )
+
+            try:
+
+                if isinstance(
+                    raw_arguments,
+                    str
+                ):
+
+                    arguments = json.loads(
+                        raw_arguments
+                    )
+
+                else:
+
+                    arguments = raw_arguments
+
+            except Exception as error:
+
+                result = {
+                    "error": (
+                        "Invalid tool arguments: "
+                        + repr(error)
+                    )
+                }
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get(
+                        "id",
+                        ""
+                    ),
+                    "content": json.dumps(
+                        result,
+                        ensure_ascii=False
+                    ),
+                })
+
+                continue
+
+            print(
+                "[TOOL]",
+                name,
+                arguments,
+                flush=True,
+            )
+
+            try:
+
+                result = await execute_tool(
+                    name,
+                    arguments,
+                )
+
+            except Exception as error:
+
+                result = {
+                    "error": str(error)
+                }
+
+            result_text = json.dumps(
+                result,
+                ensure_ascii=False
+            )
+
+            # Avoid huge context
+            if len(result_text) > 24000:
+                result_text = (
+                    result_text[:24000]
+                    + "\n...[truncated]"
+                )
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.get(
+                    "id",
+                    ""
+                ),
+                "content": result_text,
+            })
+
+    return (
+        "❌ وصلت للحد الأقصى من عمليات البحث "
+        "في نفس الطلب. جرّب السؤال بشكل أبسط."
+    )
 
 
 async def generate_response(
@@ -332,7 +445,14 @@ def get_model_info():
 
     return {
         "provider": "llama.cpp",
+        "model": MODEL,
         "url": LLAMA_URL,
-        "model": LLAMA_MODEL,
         "thinking": True,
+        "tools": [
+            "web_search",
+            "open_url",
+            "github_search",
+            "github_user",
+            "github_repo",
+        ],
     }
