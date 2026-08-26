@@ -12,6 +12,9 @@ jobs:
 
     timeout-minutes: 360
 
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      AI_API_KEY: ${{ secrets.AI_API_KEY }}
     steps:
       - name: Force Telegram API IPv4
         shell: bash
