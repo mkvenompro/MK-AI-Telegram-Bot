@@ -1,4 +1,91 @@
-name: MK AI Telegram Bot
+cat > ~/fix_bot_yaml_groq.py <<'PY'
+import os
+import json
+import base64
+import subprocess
+import sys
+
+REPO = "mkvenompro/MK-AI-Telegram-Bot"
+BRANCH = "main"
+FILE = ".github/workflows/bot.yml"
+
+TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+
+if not TOKEN:
+    print("❌ GITHUB_TOKEN غير موجود")
+    sys.exit(1)
+
+API = "https://api.github.com"
+
+HEADERS = [
+    "-H", f"Authorization: Bearer {TOKEN}",
+    "-H", "Accept: application/vnd.github+json",
+    "-H", "X-GitHub-Api-Version: 2022-11-28",
+]
+
+def curl(args, data=None):
+    result = subprocess.run(
+        ["curl", "-sS"] + HEADERS + args,
+        input=data,
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        print(result.stderr)
+        sys.exit(1)
+
+    return result.stdout
+
+
+# ============================================================
+# Download current bot.yml
+# ============================================================
+
+print("📥 Downloading bot.yml...")
+
+url = f"{API}/repos/{REPO}/contents/{FILE}?ref={BRANCH}"
+
+raw = curl([url])
+
+try:
+    data = json.loads(raw)
+except Exception:
+    print("❌ GitHub returned invalid JSON:")
+    print(raw[:2000])
+    sys.exit(1)
+
+if "content" not in data:
+    print("❌ Failed reading bot.yml")
+    print(json.dumps(data, indent=2))
+    sys.exit(1)
+
+sha = data["sha"]
+
+old_content = base64.b64decode(
+    data["content"].replace("\n", "")
+).decode("utf-8")
+
+print(f"✅ bot.yml loaded: {len(old_content)} bytes")
+
+
+# ============================================================
+# Backup
+# ============================================================
+
+backup = "/data/data/com.termux/files/home/bot.yml.backup"
+
+with open(backup, "w", encoding="utf-8") as f:
+    f.write(old_content)
+
+print(f"💾 Backup saved: {backup}")
+
+
+# ============================================================
+# Correct bot.yml
+# ============================================================
+
+new_content = r'''name: MK AI Telegram Bot
 
 on:
   workflow_dispatch:
@@ -12,10 +99,9 @@ jobs:
 
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      AI_API_KEY: ${{ secrets.AI_API_KEY }}
-      AI_API_URL: https://openrouter.ai/api/v1/chat/completions
-      AI_MODEL: ${{ vars.AI_MODEL || 'openrouter/free' }}
-
+      AI_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      AI_API_URL: https://api.groq.com/openai/v1/chat/completions
+      AI_MODEL: openai/gpt-oss-120b
 
     timeout-minutes: 360
 
@@ -25,30 +111,14 @@ jobs:
         run: |
           set -eux
 
-          echo "========================================"
-          echo "FORCING TELEGRAM API TO IPv4"
-          echo "========================================"
-
           TELEGRAM_IPV4="149.154.166.110"
+
+          sudo sed -i '/api\.telegram\.org/d' /etc/hosts || true
+          echo "$TELEGRAM_IPV4 api.telegram.org" | sudo tee -a /etc/hosts
 
           echo "Telegram IPv4: $TELEGRAM_IPV4"
 
-          # Remove old Telegram hosts entries if any
-          sudo sed -i '/api\.telegram\.org/d' /etc/hosts || true
-
-          # Force hostname to IPv4
-          echo "$TELEGRAM_IPV4 api.telegram.org" | sudo tee -a /etc/hosts
-
-          echo
-          echo "Hosts:"
-          grep "api.telegram.org" /etc/hosts || true
-
-          echo
-          echo "DNS:"
           getent hosts api.telegram.org || true
-
-          echo
-          echo "Testing HTTPS over IPv4..."
 
           curl -4 \
             --connect-timeout 10 \
@@ -58,24 +128,18 @@ jobs:
             https://api.telegram.org/ \
             -o /tmp/telegram_test.html
 
-          echo
           echo "Telegram IPv4 connection: OK"
-          echo
+
       - name: Configure Python networking
         shell: bash
         run: |
-          echo "========================================"
-          echo "PYTHON NETWORK CONFIG"
-          echo "========================================"
-
-          # Prefer IPv4 when Python resolves Telegram API.
           echo "RES_OPTIONS=single-request-reopen" >> "$GITHUB_ENV"
 
-          # Disable HTTP proxy variables if they interfere.
           unset HTTP_PROXY HTTPS_PROXY ALL_PROXY
           unset http_proxy https_proxy all_proxy
 
           echo "Network environment configured."
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -91,59 +155,171 @@ jobs:
           pip install -r requirements.txt
 
       - name: Check configuration
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          if [ -z "$BOT_TOKEN" ]; then
+          set -e
+
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
             echo "::error::BOT_TOKEN secret is missing."
             exit 1
           fi
 
+          if [ -z "$AI_API_KEY" ]; then
+            echo "::error::GROQ_API_KEY secret is missing."
+            exit 1
+          fi
+
           echo "BOT_TOKEN secret is present."
+          echo "GROQ_API_KEY secret is present."
+          echo "AI provider: Groq"
+          echo "AI model: $AI_MODEL"
+          echo "AI endpoint: $AI_API_URL"
 
       - name: Test Telegram API
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           echo "Testing Telegram API..."
 
           python - <<'PY'
           import os
           import urllib.request
-          import urllib.error
 
-          token = os.environ["BOT_TOKEN"]
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
 
           url = f"https://api.telegram.org/bot{token}/getMe"
 
-          try:
-              with urllib.request.urlopen(url, timeout=20) as r:
-                  data = r.read().decode()
-                  print("Telegram API HTTP:", r.status)
-                  print("Telegram API reachable.")
-                  print("Response received:", data[:500])
+          with urllib.request.urlopen(url, timeout=20) as r:
+              data = r.read().decode()
 
-          except Exception as e:
-              print("Telegram API connection failed:")
-              print(type(e).__name__, str(e))
-              raise
+          print("Telegram API HTTP:", r.status)
+          print("Telegram API reachable.")
+          print("Response received:", data[:500])
           PY
 
-      - name: Run bot
-        env:
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      - name: Test Groq API
         run: |
-      - name: Check AI_API_KEY Secret
-        env:
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
-        run: |
-          if [ -z "$AI_API_KEY" ]; then
-            echo "❌ AI_API_KEY is NOT available"
-            exit 1
-          fi
+          echo "Testing Groq API..."
 
-          echo "✅ AI_API_KEY is available"
-          echo "Length: ${#AI_API_KEY}"
+          python - <<'PY'
+          import os
+          import json
+          import urllib.request
+          import urllib.error
+
+          api_key = os.environ["AI_API_KEY"]
+          url = os.environ["AI_API_URL"]
+          model = os.environ["AI_MODEL"]
+
+          payload = {
+              "model": model,
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": "Reply with exactly: GROQ_OK"
+                  }
+              ],
+              "temperature": 0,
+              "max_tokens": 20
+          }
+
+          request = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": f"Bearer {api_key}",
+                  "Content-Type": "application/json",
+                  "Accept": "application/json"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  body = response.read().decode("utf-8")
+
+              print("Groq API HTTP:", response.status)
+
+              result = json.loads(body)
+
+              if "choices" not in result:
+                  print(body[:2000])
+                  raise RuntimeError("Invalid Groq response")
+
+              print("Groq API test: OK")
+
+          except urllib.error.HTTPError as e:
+              body = e.read().decode(
+                  "utf-8",
+                  errors="replace"
+              )
+
+              print("❌ Groq API HTTP:", e.code)
+              print(body[:2000])
+              raise
+
+      - name: Run bot
+        run: |
+          echo "========================================"
+          echo "Starting MK AI Telegram Bot"
+          echo "========================================"
+          echo "Provider: Groq"
+          echo "Model: $AI_MODEL"
+          echo "Endpoint: $AI_API_URL"
+          echo "========================================"
+
           python bot.py
+'''
+
+
+# ============================================================
+# Upload
+# ============================================================
+
+print()
+print("📤 Uploading corrected bot.yml...")
+
+body = {
+    "message": "fix: repair bot workflow for Groq",
+    "content": base64.b64encode(
+        new_content.encode("utf-8")
+    ).decode("ascii"),
+    "sha": sha,
+    "branch": BRANCH,
+}
+
+raw = curl(
+    [
+        "-X", "PUT",
+        "-H", "Content-Type: application/json",
+        "--data-binary", "@-",
+        f"{API}/repos/{REPO}/contents/{FILE}",
+    ],
+    json.dumps(body)
+)
+
+try:
+    result = json.loads(raw)
+except Exception:
+    print("❌ Invalid GitHub response:")
+    print(raw[:3000])
+    sys.exit(1)
+
+if "content" not in result:
+    print("❌ Upload failed:")
+    print(json.dumps(result, indent=2))
+    sys.exit(1)
+
+print()
+print("=" * 60)
+print("✅ bot.yml FIXED")
+print("=" * 60)
+print()
+print("Provider : Groq")
+print("Model    : openai/gpt-oss-120b")
+print("Endpoint : https://api.groq.com/openai/v1/chat/completions")
+print()
+print("Only .github/workflows/bot.yml was modified.")
+print(f"Backup: {backup}")
+print()
+print("Run GitHub Actions again.")
+PY
+
+python ~/fix_bot_yaml_groq.py
