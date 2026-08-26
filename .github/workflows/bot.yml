@@ -16,9 +16,9 @@ jobs:
 
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      AI_API_KEY: ${{ secrets.AI_API_KEY }}
-      AI_API_URL: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
-      AI_MODEL: gemini-3.6-flash
+      AI_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      AI_API_URL: ${{ secrets.OPENCODE_URL }}
+      AI_MODEL: ${{ vars.OPENCODE_MODEL || '' }}
 
     timeout-minutes: 360
 
@@ -74,7 +74,7 @@ jobs:
       - name: Check configuration
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+      AI_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
           if [ -z "$BOT_TOKEN" ]; then
             echo "::error::BOT_TOKEN secret is missing."
@@ -117,8 +117,8 @@ jobs:
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          AI_API_URL: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
-          AI_MODEL: gemini-3.6-flash
+      AI_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      AI_API_URL: ${{ secrets.OPENCODE_URL }}
+      AI_MODEL: ${{ vars.OPENCODE_MODEL || '' }}
         run: |
           python bot.py
