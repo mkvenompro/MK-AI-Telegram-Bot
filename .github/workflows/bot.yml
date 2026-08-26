@@ -13,100 +13,229 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+
+    timeout-minutes: 20
 
     env:
-      SERVER_HOST: ${{ secrets.SERVER_HOST }}
-      SERVER_USER: ${{ secrets.SERVER_USER }}
-      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SERVER_HOST: 94.237.93.1
+      SERVER_USER: root
+      SERVER_PATH: /root/MK-AI-Telegram-Bot
 
     steps:
-      - name: Checkout
+
+      # ==========================================================
+      # 1. Checkout
+      # ==========================================================
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup SSH
+
+      # ==========================================================
+      # 2. Configure SSH
+      # ==========================================================
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "========================================"
+          echo "Configuring SSH"
+          echo "========================================"
+
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
 
+          if [ -z "${SSH_PRIVATE_KEY:-}" ]; then
+            echo "::error::SSH_PRIVATE_KEY secret is empty or missing."
+            exit 1
+          fi
+
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+
           chmod 600 "$HOME/.ssh/id_ed25519"
 
-          ssh-keyscan -H "$SERVER_HOST" >> "$HOME/.ssh/known_hosts"
+          echo "Testing private key..."
+
+          ssh-keygen -y \
+            -f "$HOME/.ssh/id_ed25519" \
+            > "$HOME/.ssh/id_ed25519.pub"
+
+          echo "Private key format: OK"
+
+          ssh-keyscan \
+            -H \
+            -T 10 \
+            "$SERVER_HOST" \
+            >> "$HOME/.ssh/known_hosts"
+
+          chmod 644 "$HOME/.ssh/known_hosts"
 
           echo "SSH configured."
+
+
+      # ==========================================================
+      # 3. Test SSH connection
+      # ==========================================================
 
       - name: Test SSH connection
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "========================================"
+          echo "Testing SSH connection"
+          echo "========================================"
+
           ssh \
-            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -o ConnectTimeout=20 \
             -i "$HOME/.ssh/id_ed25519" \
             "$SERVER_USER@$SERVER_HOST" \
             'echo SSH_CONNECTION_OK'
 
-      - name: Deploy and start MK AI
-        shell: bash
+          echo "SSH connection successful."
+
+
+      # ==========================================================
+      # 4. Deploy to server
+      # ==========================================================
+
+      - name: Deploy MK AI to server
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          AI_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          AI_API_URL: ${{ secrets.OPENCODE_URL }}
-          AI_MODEL: ${{ vars.OPENCODE_MODEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_API_URL: ${{ secrets.AI_API_URL }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+        shell: bash
         run: |
           set -euo pipefail
 
           echo "========================================"
-          echo "Connecting to server"
+          echo "Deploying MK AI"
           echo "========================================"
 
           ssh \
-            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -o ConnectTimeout=20 \
             -i "$HOME/.ssh/id_ed25519" \
             "$SERVER_USER@$SERVER_HOST" \
-            "TELEGRAM_BOT_TOKEN='$TELEGRAM_BOT_TOKEN' \
-             AI_API_KEY='$AI_API_KEY' \
-             AI_API_URL='$AI_API_URL' \
-             AI_MODEL='$AI_MODEL' \
-             bash -s" <<'REMOTE_SCRIPT'
+            "mkdir -p '$SERVER_PATH'"
+
+
+          # ======================================================
+          # Upload repository files
+          # ======================================================
+
+          echo "Uploading repository..."
+
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='data/memory.json' \
+            -czf - . \
+          | ssh \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              -o IdentitiesOnly=yes \
+              -i "$HOME/.ssh/id_ed25519" \
+              "$SERVER_USER@$SERVER_HOST" \
+              "tar -xzf - -C '$SERVER_PATH'"
+
+
+          # ======================================================
+          # Create .env on server
+          # ======================================================
+
+          echo "Creating server environment..."
+
+          export TELEGRAM_BOT_TOKEN
+          export AI_API_KEY
+          export AI_API_URL
+          export AI_MODEL
+
+          python3 - <<'PY' > /tmp/mk-ai-env
+          import os
+
+          values = {
+              "TELEGRAM_BOT_TOKEN": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+              "AI_API_KEY": os.environ.get("AI_API_KEY", ""),
+              "AI_API_URL": os.environ.get(
+                  "AI_API_URL",
+                  "https://openrouter.ai/api/v1/chat/completions"
+              ),
+              "AI_MODEL": os.environ.get("AI_MODEL", ""),
+              "MAX_HISTORY": "12",
+              "MAX_MESSAGE_LENGTH": "4000",
+          }
+
+          for key, value in values.items():
+              value = value.replace("\\", "\\\\").replace("\n", "\\n")
+              print(f"{key}={value}")
+          PY
+
+          scp \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -i "$HOME/.ssh/id_ed25519" \
+            /tmp/mk-ai-env \
+            "$SERVER_USER@$SERVER_HOST:$SERVER_PATH/.env.tmp"
+
+          rm -f /tmp/mk-ai-env
+
+
+          # ======================================================
+          # Server setup
+          # ======================================================
+
+          echo "Running server setup..."
+
+          ssh \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -i "$HOME/.ssh/id_ed25519" \
+            "$SERVER_USER@$SERVER_HOST" \
+            "SERVER_PATH='$SERVER_PATH' bash -s" <<'REMOTE_SCRIPT'
 
           set -euo pipefail
 
-          REPO_DIR="/root/MK-AI-Telegram-Bot"
-
           echo "========================================"
-          echo "Updating repository"
+          echo "SERVER SETUP"
           echo "========================================"
 
-          if [ ! -d "$REPO_DIR/.git" ]; then
-              git clone https://github.com/mkvenompro/MK-AI-Telegram-Bot.git "$REPO_DIR"
-          fi
+          cd "$SERVER_PATH"
 
-          cd "$REPO_DIR"
 
-          git fetch origin main
-          git reset --hard origin/main
-          git clean -fd
+          # ------------------------------------------------------
+          # Install required system packages
+          # ------------------------------------------------------
 
-          echo "========================================"
-          echo "Installing system dependencies"
-          echo "========================================"
+          echo "Checking system packages..."
 
           export DEBIAN_FRONTEND=noninteractive
 
-          apt-get update -y
+          apt-get update
 
           apt-get install -y \
-              python3 \
-              python3-venv \
-              python3-pip \
-              build-essential
+            python3 \
+            python3-venv \
+            python3-pip \
+            python3-dev \
+            build-essential
+
+
+          # ------------------------------------------------------
+          # Install Python virtual environment
+          # ------------------------------------------------------
 
           echo "========================================"
           echo "Creating virtual environment"
@@ -117,86 +246,229 @@ jobs:
           fi
 
           .venv/bin/python -m ensurepip --upgrade || true
+
+
+          # ------------------------------------------------------
+          # Update pip
+          # ------------------------------------------------------
+
+          echo "========================================"
+          echo "Updating pip"
+          echo "========================================"
+
           .venv/bin/python -m pip install --upgrade pip
+
+
+          # ------------------------------------------------------
+          # Install dependencies
+          # ------------------------------------------------------
 
           echo "========================================"
           echo "Installing requirements"
           echo "========================================"
 
-          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install \
+            -r requirements.txt
+
+
+          # ------------------------------------------------------
+          # Install environment file
+          # ------------------------------------------------------
 
           echo "========================================"
-          echo "Creating environment file"
+          echo "Installing environment"
           echo "========================================"
 
-          umask 077
+          if [ ! -f ".env.tmp" ]; then
+              echo "ERROR: .env.tmp was not uploaded."
+              exit 1
+          fi
 
-          cat > .env <<EOF
-          TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-          AI_API_KEY=${AI_API_KEY}
-          AI_API_URL=${AI_API_URL}
-          AI_MODEL=${AI_MODEL}
-          MAX_HISTORY=12
-          MAX_MESSAGE_LENGTH=4000
-          EOF
+          mv .env.tmp .env
 
           chmod 600 .env
+
+
+          # ------------------------------------------------------
+          # Check required environment variables
+          # ------------------------------------------------------
+
+          echo "Checking configuration..."
+
+          set -a
+          . ./.env
+          set +a
+
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+              echo "ERROR: TELEGRAM_BOT_TOKEN is missing."
+              exit 1
+          fi
+
+          if [ -z "${AI_API_KEY:-}" ]; then
+              echo "ERROR: AI_API_KEY is missing."
+              exit 1
+          fi
+
+          if [ -z "${AI_API_URL:-}" ]; then
+              echo "ERROR: AI_API_URL is missing."
+              exit 1
+          fi
+
+          echo "Configuration OK."
+
+
+          # ------------------------------------------------------
+          # Create data directory
+          # ------------------------------------------------------
+
+          mkdir -p data
+
+
+          # ------------------------------------------------------
+          # Stop old MK AI process
+          # ------------------------------------------------------
 
           echo "========================================"
           echo "Stopping old MK AI process"
           echo "========================================"
 
           if [ -f "mk-ai.pid" ]; then
-              OLD_PID="$(cat mk-ai.pid || true)"
 
-              if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-                  kill "$OLD_PID" || true
-                  sleep 2
+              OLD_PID="$(cat mk-ai.pid 2>/dev/null || true)"
+
+              if [ -n "$OLD_PID" ]; then
+
+                  if kill -0 "$OLD_PID" 2>/dev/null; then
+                      echo "Stopping PID: $OLD_PID"
+                      kill "$OLD_PID" 2>/dev/null || true
+                      sleep 2
+                  fi
+
               fi
 
               rm -f mk-ai.pid
           fi
 
-          pkill -f "python.*bot.py" || true
-          sleep 2
+
+          # Kill only old bot.py processes from this directory
+
+          OLD_PIDS="$(
+              ps -eo pid,args \
+              | grep '[p]ython.*bot.py' \
+              | grep "$SERVER_PATH" \
+              | awk '{print $1}' \
+              || true
+          )"
+
+          if [ -n "$OLD_PIDS" ]; then
+
+              echo "Old processes:"
+              echo "$OLD_PIDS"
+
+              kill $OLD_PIDS 2>/dev/null || true
+
+              sleep 2
+
+              for PID in $OLD_PIDS; do
+                  if kill -0 "$PID" 2>/dev/null; then
+                      kill -9 "$PID" 2>/dev/null || true
+                  fi
+              done
+          fi
+
+
+          # ------------------------------------------------------
+          # Start MK AI
+          # ------------------------------------------------------
 
           echo "========================================"
           echo "Starting MK AI"
           echo "========================================"
 
-          nohup .venv/bin/python bot.py \
-              > mk-ai.log 2>&1 < /dev/null &
+          nohup \
+            "$SERVER_PATH/.venv/bin/python" \
+            "$SERVER_PATH/bot.py" \
+            > "$SERVER_PATH/mk-ai.log" \
+            2>&1 < /dev/null &
 
           BOT_PID=$!
 
-          echo "$BOT_PID" > mk-ai.pid
+          echo "$BOT_PID" > "$SERVER_PATH/mk-ai.pid"
+
+          echo "Bot PID: $BOT_PID"
+
+
+          # ------------------------------------------------------
+          # Give bot time to start
+          # ------------------------------------------------------
 
           sleep 5
 
-          echo "Bot PID: $BOT_PID"
+
+          # ------------------------------------------------------
+          # Check process
+          # ------------------------------------------------------
 
           echo "========================================"
           echo "Checking MK AI"
           echo "========================================"
 
           if kill -0 "$BOT_PID" 2>/dev/null; then
+
               echo "========================================"
               echo "MK AI STARTED SUCCESSFULLY"
+              echo "PID: $BOT_PID"
               echo "========================================"
+
           else
+
               echo "========================================"
               echo "MK AI FAILED TO START"
               echo "========================================"
 
               echo "===== LAST 100 LOG LINES ====="
 
-              tail -n 100 mk-ai.log || true
+              tail -n 100 "$SERVER_PATH/mk-ai.log" || true
 
               exit 1
           fi
 
+
+          # ------------------------------------------------------
+          # Show process
+          # ------------------------------------------------------
+
           echo "========================================"
-          echo "Deployment completed"
+          echo "PROCESS"
+          echo "========================================"
+
+          ps aux | grep '[p]ython.*bot.py' || true
+
+
+          # ------------------------------------------------------
+          # Finished
+          # ------------------------------------------------------
+
+          echo "========================================"
+          echo "DEPLOYMENT FINISHED"
           echo "========================================"
 
           REMOTE_SCRIPT
+
+
+      # ==========================================================
+      # 5. Final status
+      # ==========================================================
+
+      - name: Deployment complete
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "MK AI DEPLOYMENT COMPLETE"
+          echo "========================================"
+          echo
+          echo "Server:"
+          echo "root@94.237.93.1"
+          echo
+          echo "The GitHub Action can now finish."
+          echo "The MK AI bot continues running on the server."
