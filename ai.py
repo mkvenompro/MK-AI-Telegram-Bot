@@ -1,69 +1,137 @@
+import json
+import os
+from typing import Optional
+
 import httpx
 
-from config import (
-    AI_API_URL,
-    AI_MODEL,
-    MAX_MESSAGE_LENGTH,
+
+OLLAMA_URL = os.getenv(
+    "OLLAMA_URL",
+    "http://127.0.0.1:11434"
 )
 
-SYSTEM_PROMPT = (
-    "You are MK AI, a helpful Telegram assistant. "
-    "Answer naturally and clearly. "
-    "You can speak Egyptian Arabic, Arabic or English. "
-    "Give practical answers for Android, ROM, Linux, GitHub and programming. "
-    "Never pretend you performed an action you did not perform."
+PRIMARY_MODEL = os.getenv(
+    "OLLAMA_MODEL",
+    "qwen3:8b"
+)
+
+FALLBACK_MODEL = os.getenv(
+    "OLLAMA_FALLBACK_MODEL",
+    "qwen3:4b"
 )
 
 
-async def ask_ai(history):
-    messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        }
-    ]
-
-    messages.extend(history)
+async def _ollama_chat(
+    model: str,
+    messages: list,
+    timeout: float = 180.0,
+) -> str:
 
     payload = {
-        "model": AI_MODEL,
+        "model": model,
         "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 1200,
+        "think": False,
+        "stream": False,
     }
 
-    headers = {
-        "Content-Type": "application/json",
-    }
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout)
+    ) as client:
 
-    async with httpx.AsyncClient(timeout=90) as client:
         response = await client.post(
-            AI_API_URL,
-            headers=headers,
+            f"{OLLAMA_URL}/api/chat",
             json=payload,
         )
 
-        if response.status_code >= 400:
-            error_body = response.text[:2000]
-
-            print(f"OpenCode HTTP {response.status_code}")
-            print(f"OpenCode response: {error_body}")
-
-            raise RuntimeError(
-                f"OpenCode returned HTTP {response.status_code}: "
-                f"{error_body}"
-            )
+        response.raise_for_status()
 
         data = response.json()
 
+    message = data.get("message", {})
+    content = message.get("content", "")
+
+    if not isinstance(content, str):
+        return str(content)
+
+    return content.strip()
+
+
+async def ask_ai(
+    prompt: str,
+    history: Optional[list] = None,
+) -> str:
+
+    messages = []
+
+    if history:
+        messages.extend(history)
+
+    messages.append({
+        "role": "user",
+        "content": prompt,
+    })
+
+    # Primary model
     try:
-        answer = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        raise RuntimeError(
-            "Invalid OpenCode response: " + str(data)
+        return await _ollama_chat(
+            PRIMARY_MODEL,
+            messages,
         )
 
-    if not answer:
-        return "مش عارف أطلع رد دلوقتي 😅"
+    except Exception as primary_error:
 
-    return answer[:MAX_MESSAGE_LENGTH]
+        # Fallback model
+        try:
+            return await _ollama_chat(
+                FALLBACK_MODEL,
+                messages,
+            )
+
+        except Exception as fallback_error:
+
+            print(
+                "Ollama primary error:",
+                repr(primary_error),
+            )
+
+            print(
+                "Ollama fallback error:",
+                repr(fallback_error),
+            )
+
+            return (
+                "❌ حصل خطأ وأنا بحاول أتواصل مع الـ AI.\n"
+                "جرب تاني بعد شوية."
+            )
+
+
+async def generate_response(
+    prompt: str,
+    history: Optional[list] = None,
+) -> str:
+
+    return await ask_ai(
+        prompt,
+        history,
+    )
+
+
+async def chat(
+    prompt: str,
+    history: Optional[list] = None,
+) -> str:
+
+    return await ask_ai(
+        prompt,
+        history,
+    )
+
+
+def get_model_info() -> dict:
+
+    return {
+        "provider": "ollama",
+        "url": OLLAMA_URL,
+        "model": PRIMARY_MODEL,
+        "fallback": FALLBACK_MODEL,
+    }
