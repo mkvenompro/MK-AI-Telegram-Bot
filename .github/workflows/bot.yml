@@ -1,19 +1,19 @@
 name: MK AI - Deploy to Server
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 concurrency:
   group: mk-ai-deploy
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -21,170 +21,93 @@ jobs:
 
       - name: Setup SSH
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PRIVATE_KEY_B64: ${{ secrets.SSH_PRIVATE_KEY_B64 }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
         run: |
           set -euo pipefail
 
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
 
-          # Convert the GitHub secret into a valid OpenSSH key.
-          printf '%s\n' "$SSH_PRIVATE_KEY" \
-            | tr -d '\r' \
-            > "$HOME/.ssh/id_ed25519"
+          if [ -z "${SSH_PRIVATE_KEY_B64:-}" ]; then
+            echo "::error::SSH_PRIVATE_KEY_B64 is empty"
+            exit 1
+          fi
+
+          if [ -z "${SERVER_HOST:-}" ]; then
+            echo "::error::SERVER_HOST is empty"
+            exit 1
+          fi
+
+          printf '%s' "$SSH_PRIVATE_KEY_B64" | base64 --decode > "$HOME/.ssh/id_ed25519"
 
           chmod 600 "$HOME/.ssh/id_ed25519"
 
-          # Verify that the private key is readable.
+          echo "Checking private key..."
+
           ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > "$HOME/.ssh/id_ed25519.pub"
 
-          # Trust the server host key.
-          ssh-keyscan -H 94.237.93.1 >> "$HOME/.ssh/known_hosts"
+          echo "Private key is valid."
 
-          chmod 644 "$HOME/.ssh/known_hosts"
+          ssh-keyscan -H "$SERVER_HOST" >> "$HOME/.ssh/known_hosts"
 
-          echo "SSH key verified successfully."
+          chmod 600 "$HOME/.ssh/known_hosts"
 
-      - name: Test SSH connection
-        run: |
-          set -euo pipefail
-
-          ssh \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o ConnectTimeout=20 \
-            -i "$HOME/.ssh/id_ed25519" \
-            root@94.237.93.1 \
-            "echo 'SSH connection OK'; hostname; whoami"
-
-      - name: Deploy bot
+      - name: Test SSH
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          OPENCODE_URL: ${{ secrets.OPENCODE_URL }}
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || '' }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
         run: |
           set -euo pipefail
 
           ssh \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
             -i "$HOME/.ssh/id_ed25519" \
-            root@94.237.93.1 \
-            "mkdir -p /opt/mk-ai-bot"
+            "root@$SERVER_HOST" \
+            "echo SSH_CONNECTION_OK"
 
-          tar \
-            --exclude='.git' \
-            --exclude='data/memory.json' \
-            -czf /tmp/mk-ai-bot.tar.gz .
-
-          scp \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -i "$HOME/.ssh/id_ed25519" \
-            /tmp/mk-ai-bot.tar.gz \
-            root@94.237.93.1:/tmp/mk-ai-bot.tar.gz
-
-          ssh \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -i "$HOME/.ssh/id_ed25519" \
-            root@94.237.93.1 \
-            "cd /opt/mk-ai-bot && tar -xzf /tmp/mk-ai-bot.tar.gz && rm -f /tmp/mk-ai-bot.tar.gz"
-
-          # Create environment file on the server.
-          # Values are passed through SSH stdin so they are not
-          # written into the workflow command itself.
-          cat > /tmp/mk-ai-env <<EOF
-          TELEGRAM_BOT_TOKEN=$BOT_TOKEN
-          AI_API_URL=$OPENCODE_URL
-          AI_API_KEY=$OPENCODE_API_KEY
-          AI_MODEL=$OPENCODE_MODEL
-          MAX_HISTORY=12
-          MAX_MESSAGE_LENGTH=4000
-          EOF
-
-          scp \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -i "$HOME/.ssh/id_ed25519" \
-            /tmp/mk-ai-env \
-            root@94.237.93.1:/opt/mk-ai-bot/.env
-
-          rm -f /tmp/mk-ai-env
-
-      - name: Install dependencies and create service
+      - name: Deploy to server
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
         run: |
           set -euo pipefail
 
           ssh \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
             -i "$HOME/.ssh/id_ed25519" \
-            root@94.237.93.1 \
-            'bash -s' <<'REMOTE'
-          set -euo pipefail
+            "root@$SERVER_HOST" \
+            'bash -s' <<'REMOTE_SCRIPT'
 
-          cd /opt/mk-ai-bot
+          set -e
 
-          apt-get update
-          apt-get install -y python3 python3-venv python3-pip
+          cd /root/MK-AI-Telegram-Bot
 
-          if [ ! -d /opt/mk-ai-bot/venv ]; then
-              python3 -m venv /opt/mk-ai-bot/venv
+          echo "Updating repository..."
+
+          git fetch origin main
+          git reset --hard origin/main
+
+          echo "Installing dependencies..."
+
+          python3 -m pip install -r requirements.txt
+
+          echo "Restarting MK AI..."
+
+          pkill -f "python3 bot.py" || true
+
+          nohup python3 bot.py > /root/mk-ai-bot.log 2>&1 &
+
+          sleep 2
+
+          if pgrep -f "python3 bot.py" >/dev/null; then
+              echo "MK AI started successfully."
+          else
+              echo "MK AI failed to start."
+              tail -100 /root/mk-ai-bot.log || true
+              exit 1
           fi
 
-          /opt/mk-ai-bot/venv/bin/pip install --upgrade pip
-          /opt/mk-ai-bot/venv/bin/pip install -r requirements.txt
-
-          chmod 600 /opt/mk-ai-bot/.env
-
-          cat > /etc/systemd/system/mk-ai-bot.service <<'SERVICE'
-          [Unit]
-          Description=MK AI Telegram Bot
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=simple
-          WorkingDirectory=/opt/mk-ai-bot
-          EnvironmentFile=/opt/mk-ai-bot/.env
-          ExecStart=/opt/mk-ai-bot/venv/bin/python /opt/mk-ai-bot/bot.py
-          Restart=always
-          RestartSec=5
-
-          [Install]
-          WantedBy=multi-user.target
-          SERVICE
-
-          systemctl daemon-reload
-          systemctl enable mk-ai-bot.service
-          systemctl restart mk-ai-bot.service
-
-          sleep 3
-
-          systemctl --no-pager --full status mk-ai-bot.service || true
-
-          echo "========================================"
-          echo "MK AI BOT DEPLOYED"
-          echo "========================================"
-          REMOTE
-
-      - name: Check bot
-        run: |
-          set -euo pipefail
-
-          ssh \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -i "$HOME/.ssh/id_ed25519" \
-            root@94.237.93.1 \
-            "systemctl is-active --quiet mk-ai-bot.service && echo 'MK AI Bot is RUNNING'"
-
-      - name: Cleanup
-        if: always()
-        run: |
-          rm -f "$HOME/.ssh/id_ed25519"
-          rm -f "$HOME/.ssh/id_ed25519.pub"
-          rm -f "$HOME/.ssh/known_hosts"
-          rm -f /tmp/mk-ai-bot.tar.gz
+          REMOTE_SCRIPT
