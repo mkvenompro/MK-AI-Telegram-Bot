@@ -4,6 +4,247 @@ on:
   workflow_dispatch:
 
 jobs:
+
+  diagnose-telegram:
+    name: Diagnose Telegram API
+    runs-on: ubuntu-latest
+
+    env:
+      TEST_TELEGRAM_TOKEN: ${{ secrets.TEST_TELEGRAM_TOKEN }}
+
+    steps:
+
+      - name: System information
+        run: |
+          echo "========================================"
+          echo "SYSTEM INFORMATION"
+          echo "========================================"
+
+          uname -a
+          echo
+
+          cat /etc/os-release
+          echo
+
+          date -u
+
+      - name: DNS diagnostic
+        run: |
+          echo
+          echo "========================================"
+          echo "DNS DIAGNOSTIC"
+          echo "========================================"
+
+          echo "--- getent ---"
+          getent hosts api.telegram.org || true
+
+          echo
+          echo "--- IPv4 ---"
+          getent ahostsv4 api.telegram.org || true
+
+          echo
+          echo "--- IPv6 ---"
+          getent ahostsv6 api.telegram.org || true
+
+          echo
+          echo "--- nslookup ---"
+          nslookup api.telegram.org || true
+
+          echo
+          echo "--- dig A ---"
+          dig api.telegram.org A || true
+
+          echo
+          echo "--- dig AAAA ---"
+          dig api.telegram.org AAAA || true
+
+      - name: TCP 443 test
+        run: |
+          echo
+          echo "========================================"
+          echo "TCP 443 TEST"
+          echo "========================================"
+
+          IP=$(getent ahostsv4 api.telegram.org | awk 'NR==1 {print $1}')
+
+          echo "IPv4: $IP"
+
+          if [ -n "$IP" ]; then
+            timeout 15 bash -c "</dev/tcp/$IP/443" \
+              && echo "TCP IPv4 443: OPEN" \
+              || echo "TCP IPv4 443: FAILED"
+          fi
+
+      - name: HTTPS IPv4 test
+        run: |
+          echo
+          echo "========================================"
+          echo "HTTPS IPv4"
+          echo "========================================"
+
+          curl \
+            -4 \
+            -v \
+            --connect-timeout 10 \
+            --max-time 30 \
+            https://api.telegram.org/ \
+            2>&1 || true
+
+      - name: HTTPS IPv6 test
+        run: |
+          echo
+          echo "========================================"
+          echo "HTTPS IPv6"
+          echo "========================================"
+
+          curl \
+            -6 \
+            -v \
+            --connect-timeout 10 \
+            --max-time 30 \
+            https://api.telegram.org/ \
+            2>&1 || true
+
+      - name: TLS test
+        run: |
+          echo
+          echo "========================================"
+          echo "TLS TEST"
+          echo "========================================"
+
+          timeout 30 openssl s_client \
+            -connect api.telegram.org:443 \
+            -servername api.telegram.org \
+            </dev/null \
+            2>&1 || true
+
+      - name: Telegram API test
+        run: |
+          echo
+          echo "========================================"
+          echo "TEST TELEGRAM API"
+          echo "========================================"
+
+          if [ -z "$TEST_TELEGRAM_TOKEN" ]; then
+            echo "ERROR: TEST_TELEGRAM_TOKEN is missing."
+            exit 1
+          fi
+
+          echo "Secret detected."
+          echo "Token will NOT be printed."
+
+          URL="https://api.telegram.org/bot${TEST_TELEGRAM_TOKEN}/getMe"
+
+          echo
+          echo "--- IPv4 Telegram API ---"
+
+          curl \
+            -4 \
+            -sS \
+            -D /tmp/headers \
+            -o /tmp/response \
+            --connect-timeout 15 \
+            --max-time 45 \
+            "$URL"
+
+          RESULT=$?
+
+          echo
+          echo "curl exit code: $RESULT"
+
+          echo
+          echo "HTTP headers:"
+          cat /tmp/headers 2>/dev/null || true
+
+          echo
+          echo "Telegram response:"
+
+          sed -E \
+            's/[0-9]{8,12}:[A-Za-z0-9_-]{20,}/[TOKEN-REDACTED]/g' \
+            /tmp/response 2>/dev/null || true
+
+          echo
+          echo "--- IPv6 Telegram API ---"
+
+          curl \
+            -6 \
+            -sS \
+            --connect-timeout 15 \
+            --max-time 30 \
+            "$URL" \
+            2>&1 || true
+
+      - name: Telegram API without token
+        run: |
+          echo
+          echo "========================================"
+          echo "TELEGRAM SERVER TEST"
+          echo "========================================"
+
+          echo "--- IPv4 ---"
+
+          curl \
+            -4 \
+            -I \
+            -v \
+            --connect-timeout 10 \
+            --max-time 30 \
+            https://api.telegram.org/ \
+            2>&1 || true
+
+          echo
+          echo "--- IPv6 ---"
+
+          curl \
+            -6 \
+            -I \
+            -v \
+            --connect-timeout 10 \
+            --max-time 30 \
+            https://api.telegram.org/ \
+            2>&1 || true
+
+      - name: Traceroute
+        run: |
+          echo
+          echo "========================================"
+          echo "NETWORK ROUTE"
+          echo "========================================"
+
+          sudo apt-get update -qq
+          sudo apt-get install -y traceroute -qq
+
+          echo
+          echo "--- UDP/ICMP traceroute ---"
+
+          traceroute \
+            -4 \
+            -n \
+            -m 15 \
+            -w 2 \
+            api.telegram.org || true
+
+          echo
+          echo "--- TCP 443 traceroute ---"
+
+          traceroute \
+            -4 \
+            -T \
+            -p 443 \
+            -n \
+            -m 15 \
+            -w 2 \
+            api.telegram.org || true
+
+      - name: Diagnostic finished
+        run: |
+          echo
+          echo "========================================"
+          echo "DIAGNOSTIC FINISHED"
+          echo "========================================"
+          echo
+          echo "Send the complete log."
+          echo "DO NOT send any token."
   diagnose:
     runs-on: ubuntu-latest
 
