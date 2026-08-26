@@ -179,14 +179,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        history_for_ai = history + [
-            {
-                'role': 'user',
-                'content': question,
-            }
-        ]
-
-        answer = await ask_ai(history_for_ai)
+        answer = await ask_ai(question, history)
 
     except Exception as error:
         logger.exception('AI error: %s', error)
