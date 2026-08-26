@@ -1,4 +1,3 @@
-import json
 import os
 from typing import Optional
 
@@ -8,34 +7,107 @@ import httpx
 OLLAMA_URL = os.getenv(
     "OLLAMA_URL",
     "http://127.0.0.1:11434"
-)
+).strip()
 
 PRIMARY_MODEL = os.getenv(
     "OLLAMA_MODEL",
-    "qwen3:8b"
-)
+    "qwen3:1.7b"
+).strip()
 
 FALLBACK_MODEL = os.getenv(
     "OLLAMA_FALLBACK_MODEL",
     "qwen3:4b"
+).strip()
+
+NUM_PREDICT = int(
+    os.getenv("OLLAMA_NUM_PREDICT", "160")
 )
+
+TEMPERATURE = float(
+    os.getenv("OLLAMA_TEMPERATURE", "0.4")
+)
+
+
+SYSTEM_PROMPT = """أنت مساعد عربي داخل Telegram.
+
+القواعد:
+- أجب على المستخدم مباشرة.
+- استخدم العربية إذا كان سؤال المستخدم بالعربية.
+- استخدم اللهجة المصرية بشكل طبيعي في الكلام العادي.
+- لا تكتب أي تحليل أو reasoning.
+- لا تكتب "Okay" أو "Let me check".
+- لا تشرح طريقة تفكيرك.
+- لا تكرر سؤال المستخدم.
+- أعطِ الإجابة النهائية فقط.
+- في الأسئلة البسيطة اجعل الرد قصيراً ومباشراً.
+""".strip()
 
 
 async def _ollama_chat(
     model: str,
     messages: list,
-    timeout: float = 180.0,
+    timeout: float = 75.0,
 ) -> str:
+
+    clean_messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT,
+        }
+    ]
+
+    # Only keep useful recent history
+    for msg in messages[-4:]:
+
+        if not isinstance(msg, dict):
+            continue
+
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if role not in ("user", "assistant"):
+            continue
+
+        if not isinstance(content, str):
+            continue
+
+        content = content.strip()
+
+        if not content:
+            continue
+
+        clean_messages.append({
+            "role": role,
+            "content": content,
+        })
 
     payload = {
         "model": model,
-        "messages": messages,
+        "messages": clean_messages,
+
+        # Important for Qwen3
         "think": False,
+
         "stream": False,
+
+        "options": {
+            "temperature": TEMPERATURE,
+            "num_predict": NUM_PREDICT,
+            "top_p": 0.8,
+        },
+
+        "keep_alive": "15m",
     }
 
+    timeout_config = httpx.Timeout(
+        connect=5.0,
+        read=timeout,
+        write=10.0,
+        pool=5.0,
+    )
+
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(timeout)
+        timeout=timeout_config
     ) as client:
 
         response = await client.post(
@@ -47,13 +119,21 @@ async def _ollama_chat(
 
         data = response.json()
 
-    message = data.get("message", {})
-    content = message.get("content", "")
+        message = data.get("message") or {}
 
-    if not isinstance(content, str):
-        return str(content)
+        content = message.get("content", "")
 
-    return content.strip()
+        if not isinstance(content, str):
+            content = str(content)
+
+        content = content.strip()
+
+        if not content:
+            raise RuntimeError(
+                f"Empty response from {model}"
+            )
+
+        return content
 
 
 async def ask_ai(
@@ -61,18 +141,38 @@ async def ask_ai(
     history: Optional[list] = None,
 ) -> str:
 
+    prompt = str(prompt).strip()
+
     messages = []
 
     if history:
-        messages.extend(history)
 
-    messages.append({
-        "role": "user",
-        "content": prompt,
-    })
+        for msg in history[-4:]:
 
-    # Primary model
+            if not isinstance(msg, dict):
+                continue
+
+            role = msg.get("role")
+            content = msg.get("content")
+
+            if role in ("user", "assistant") and isinstance(content, str):
+
+                messages.append({
+                    "role": role,
+                    "content": content,
+                })
+
+    # Prevent duplicated current message
+    if not messages or messages[-1].get("content") != prompt:
+
+        messages.append({
+            "role": "user",
+            "content": prompt,
+        })
+
+    # Primary FAST model
     try:
+
         return await _ollama_chat(
             PRIMARY_MODEL,
             messages,
@@ -80,29 +180,32 @@ async def ask_ai(
 
     except Exception as primary_error:
 
-        # Fallback model
-        try:
-            return await _ollama_chat(
-                FALLBACK_MODEL,
-                messages,
-            )
+        print(
+            "Primary model error:",
+            repr(primary_error),
+            flush=True,
+        )
 
-        except Exception as fallback_error:
+    # Fallback
+    try:
 
-            print(
-                "Ollama primary error:",
-                repr(primary_error),
-            )
+        return await _ollama_chat(
+            FALLBACK_MODEL,
+            messages,
+        )
 
-            print(
-                "Ollama fallback error:",
-                repr(fallback_error),
-            )
+    except Exception as fallback_error:
 
-            return (
-                "❌ حصل خطأ وأنا بحاول أتواصل مع الـ AI.\n"
-                "جرب تاني بعد شوية."
-            )
+        print(
+            "Fallback model error:",
+            repr(fallback_error),
+            flush=True,
+        )
+
+        return (
+            "❌ الـ AI مش قادر يرد دلوقتي، "
+            "جرب تاني بعد شوية."
+        )
 
 
 async def generate_response(
@@ -110,10 +213,7 @@ async def generate_response(
     history: Optional[list] = None,
 ) -> str:
 
-    return await ask_ai(
-        prompt,
-        history,
-    )
+    return await ask_ai(prompt, history)
 
 
 async def chat(
@@ -121,13 +221,10 @@ async def chat(
     history: Optional[list] = None,
 ) -> str:
 
-    return await ask_ai(
-        prompt,
-        history,
-    )
+    return await ask_ai(prompt, history)
 
 
-def get_model_info() -> dict:
+def get_model_info():
 
     return {
         "provider": "ollama",
