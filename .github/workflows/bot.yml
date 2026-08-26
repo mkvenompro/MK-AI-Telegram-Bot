@@ -1,124 +1,249 @@
-name: MK AI Telegram Bot
+name: MK AI - Deploy to Server
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
 
+  workflow_dispatch:
+
 concurrency:
-  group: mk-ai-telegram-bot
+  group: mk-ai-deploy
   cancel-in-progress: true
 
 jobs:
-  bot:
+  deploy:
     runs-on: ubuntu-latest
-
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      AI_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-      AI_API_URL: ${{ secrets.OPENCODE_URL }}
-      AI_MODEL: ${{ vars.OPENCODE_MODEL || '' }}
-
-    timeout-minutes: 360
+    timeout-minutes: 15
 
     steps:
-      - name: Force Telegram API IPv4
-        shell: bash
-        run: |
-          set -eux
 
-          TELEGRAM_IPV4="149.154.166.110"
-
-          sudo sed -i '/api\.telegram\.org/d' /etc/hosts || true
-          echo "$TELEGRAM_IPV4 api.telegram.org" | sudo tee -a /etc/hosts
-
-          echo "Telegram IPv4: $TELEGRAM_IPV4"
-
-          getent hosts api.telegram.org || true
-
-          curl -4 \
-            --connect-timeout 10 \
-            --max-time 20 \
-            --fail \
-            -sS \
-            https://api.telegram.org/ \
-            -o /tmp/telegram_test.html
-
-          echo "Telegram IPv4 connection: OK"
-
-      - name: Configure Python networking
-        shell: bash
-        run: |
-          echo "RES_OPTIONS=single-request-reopen" >> "$GITHUB_ENV"
-
-          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY
-          unset http_proxy https_proxy all_proxy
-
-          echo "Network environment configured."
+      # ------------------------------------------
+      # Checkout repository
+      # ------------------------------------------
 
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
+      # ------------------------------------------
+      # Setup SSH
+      # ------------------------------------------
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Check configuration
+      - name: Setup SSH
+        shell: bash
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      AI_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
         run: |
-          if [ -z "$BOT_TOKEN" ]; then
-            echo "::error::BOT_TOKEN secret is missing."
-            exit 1
+          set -e
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts
+
+          echo "SSH configured."
+
+      # ------------------------------------------
+      # Deploy
+      # ------------------------------------------
+
+      - name: Deploy to server
+        shell: bash
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+        run: |
+
+          set -e
+
+          ssh \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=15 \
+            -i ~/.ssh/deploy_key \
+            "$SERVER_USER@$SERVER_HOST" \
+            'bash -s' <<'REMOTE'
+
+          set -e
+
+          REPO="/root/MK-AI-Telegram-Bot"
+
+          echo "========================================"
+          echo " MK AI SERVER DEPLOY"
+          echo "========================================"
+
+          # --------------------------------------
+          # Clone if repository doesn't exist
+          # --------------------------------------
+
+          if [ ! -d "$REPO/.git" ]; then
+
+              echo "[+] Repository not found."
+              echo "[+] Cloning..."
+
+              git clone \
+                https://github.com/mkvenompro/MK-AI-Telegram-Bot.git \
+                "$REPO"
+
           fi
 
-          if [ -z "$AI_API_KEY" ]; then
-            echo "::error::AI_API_KEY secret is missing."
-            exit 1
+          cd "$REPO"
+
+          # --------------------------------------
+          # Update repository
+          # --------------------------------------
+
+          echo "[+] Updating repository..."
+
+          git fetch origin main
+          git reset --hard origin/main
+          git clean -fd
+
+          # --------------------------------------
+          # Python environment
+          # --------------------------------------
+
+          echo "[+] Preparing Python..."
+
+          if [ ! -d ".venv" ]; then
+              python3 -m venv .venv
           fi
 
-          echo "BOT_TOKEN secret is present."
-          echo "AI_API_KEY secret is present."
+          .venv/bin/python -m pip install \
+            --disable-pip-version-check \
+            --upgrade pip
 
-      - name: Test Telegram API
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          .venv/bin/pip install \
+            --disable-pip-version-check \
+            -r requirements.txt
+
+          # --------------------------------------
+          # Ensure data directory
+          # --------------------------------------
+
+          mkdir -p data
+
+          # --------------------------------------
+          # Restart OpenCode
+          # --------------------------------------
+
+          if systemctl list-unit-files \
+              | grep -q '^opencode.service'; then
+
+              echo "[+] Restarting OpenCode..."
+
+              systemctl restart opencode
+
+              sleep 3
+
+              if ! systemctl is-active --quiet opencode; then
+                  echo "[ERROR] OpenCode failed."
+                  systemctl status opencode --no-pager
+                  exit 1
+              fi
+
+              echo "[OK] OpenCode is running."
+
+          else
+
+              echo "[WARNING] opencode.service does not exist."
+
+          fi
+
+          # --------------------------------------
+          # Check OpenCode API
+          # --------------------------------------
+
+          if curl \
+              --fail \
+              --silent \
+              --show-error \
+              --max-time 10 \
+              http://127.0.0.1:4096/global/health \
+              >/tmp/opencode-health.json; then
+
+              echo "[OK] OpenCode API:"
+              cat /tmp/opencode-health.json
+
+          else
+
+              echo "[ERROR] OpenCode API unavailable."
+              exit 1
+
+          fi
+
+          # --------------------------------------
+          # Restart Telegram Bot
+          # --------------------------------------
+
+          echo "[+] Restarting MK AI..."
+
+          systemctl restart mk-ai
+
+          sleep 3
+
+          if ! systemctl is-active --quiet mk-ai; then
+
+              echo "[ERROR] MK AI bot failed."
+
+              systemctl status mk-ai --no-pager
+
+              echo
+              echo "===== BOT LOG ====="
+
+              journalctl \
+                -u mk-ai \
+                -n 100 \
+                --no-pager
+
+              exit 1
+
+          fi
+
+          echo "[OK] MK AI bot is running."
+
+          # --------------------------------------
+          # Final status
+          # --------------------------------------
+
+          echo
+          echo "========================================"
+          echo " DEPLOY SUCCESS"
+          echo "========================================"
+
+          echo
+          echo "OpenCode:"
+          systemctl is-active opencode || true
+
+          echo
+          echo "MK AI:"
+          systemctl is-active mk-ai || true
+
+          echo
+          echo "Commit:"
+          git rev-parse --short HEAD
+
+          echo
+          echo "Server:"
+          hostname
+
+          echo
+          echo "========================================"
+
+          REMOTE
+
+      # ------------------------------------------
+      # Done
+      # ------------------------------------------
+
+      - name: Deployment complete
         run: |
-          python - <<'PY'
-          import os
-          import urllib.request
-
-          token = os.environ["BOT_TOKEN"]
-          url = f"https://api.telegram.org/bot{token}/getMe"
-
-          try:
-              with urllib.request.urlopen(url, timeout=20) as r:
-                  data = r.read().decode()
-
-                  print("Telegram API HTTP:", r.status)
-                  print("Telegram API reachable.")
-                  print("Response:", data[:500])
-
-          except Exception as e:
-              print("Telegram API connection failed:")
-              print(type(e).__name__, str(e))
-              raise
-          PY
-
-      - name: Run bot
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      AI_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-      AI_API_URL: ${{ secrets.OPENCODE_URL }}
-      AI_MODEL: ${{ vars.OPENCODE_MODEL || '' }}
-        run: |
-          python bot.py
+          echo "========================================"
+          echo " GitHub deployment finished."
+          echo " Server services remain running."
+          echo "========================================"
