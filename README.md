@@ -46,3 +46,24 @@ Mention it:
 ## Security
 
 Never publish your Telegram Bot Token or AI API key.
+
+## OpenCode Server
+
+The bot can use an OpenCode HTTP server as its AI backend.
+
+Required GitHub Secrets:
+
+- `BOT_TOKEN`
+- `OPENCODE_URL`
+- `OPENCODE_API_KEY` (only if the OpenCode server requires authentication)
+
+Optional repository variable:
+
+- `OPENCODE_MODEL`
+
+Example:
+
+`OPENCODE_URL=https://your-opencode-server.example.com`
+
+The Telegram bot keeps its own conversation memory.
+OpenCode is used as the AI/agent backend.
