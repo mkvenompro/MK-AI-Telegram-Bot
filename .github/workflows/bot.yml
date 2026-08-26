@@ -13,6 +13,62 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: Force Telegram API IPv4
+        shell: bash
+        run: |
+          set -eux
+
+          echo "========================================"
+          echo "FORCING TELEGRAM API TO IPv4"
+          echo "========================================"
+
+          TELEGRAM_IPV4="149.154.166.110"
+
+          echo "Telegram IPv4: $TELEGRAM_IPV4"
+
+          # Remove old Telegram hosts entries if any
+          sudo sed -i '/api\.telegram\.org/d' /etc/hosts || true
+
+          # Force hostname to IPv4
+          echo "$TELEGRAM_IPV4 api.telegram.org" | sudo tee -a /etc/hosts
+
+          echo
+          echo "Hosts:"
+          grep "api.telegram.org" /etc/hosts || true
+
+          echo
+          echo "DNS:"
+          getent hosts api.telegram.org || true
+
+          echo
+          echo "Testing HTTPS over IPv4..."
+
+          curl -4 \
+            --connect-timeout 10 \
+            --max-time 20 \
+            --fail \
+            -sS \
+            https://api.telegram.org/ \
+            -o /tmp/telegram_test.html
+
+          echo
+          echo "Telegram IPv4 connection: OK"
+          echo
+      - name: Configure Python networking
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "PYTHON NETWORK CONFIG"
+          echo "========================================"
+
+          # Prefer IPv4 when Python resolves Telegram API.
+          echo "RES_OPTIONS=single-request-reopen" >> "$GITHUB_ENV"
+
+          # Disable HTTP proxy variables if they interfere.
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY
+          unset http_proxy https_proxy all_proxy
+
+          echo "Network environment configured."
       - name: Checkout
         uses: actions/checkout@v4
 
