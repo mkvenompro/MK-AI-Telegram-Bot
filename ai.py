@@ -35,7 +35,15 @@ async def ask_ai(history):
             json=payload,
         )
 
-        response.raise_for_status()
+        if response.status_code >= 400:
+            error_body = response.text[:2000]
+            print(f"AI API HTTP {response.status_code}")
+            print(f"AI API response: {error_body}")
+            raise RuntimeError(
+                f"AI API returned HTTP {response.status_code}: "
+                f"{error_body}"
+            )
+
         data = response.json()
 
     try:
