@@ -25,6 +25,19 @@ jobs:
       MAX_MESSAGE_LENGTH: 4000
 
     steps:
+      - name: Test Telegram API
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Testing connection to Telegram API..."
+          echo "========================================"
+
+          curl -4             --connect-timeout 15             --max-time 30             --fail-with-body             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"
+
+          echo ""
+          echo "Telegram API connection test completed."
+
       - name: Checkout
         uses: actions/checkout@v4
 
