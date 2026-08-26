@@ -1,11 +1,10 @@
 name: MK AI - Deploy to Server
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-
-  workflow_dispatch:
 
 concurrency:
   group: mk-ai-deploy
@@ -14,333 +13,190 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+
+    env:
+      SERVER_HOST: ${{ secrets.SERVER_HOST }}
+      SERVER_USER: ${{ secrets.SERVER_USER }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
 
     steps:
-
-      # ========================================
-      # Checkout repository
-      # ========================================
-
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ========================================
-      # Setup SSH
-      # ========================================
-
       - name: Setup SSH
-        env:
-          SSH_PRIVATE_KEY_B64: ${{ secrets.SSH_PRIVATE_KEY_B64 }}
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-
+        shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
 
-          if [ -z "${SSH_PRIVATE_KEY_B64:-}" ]; then
-            echo "::error::SSH_PRIVATE_KEY_B64 secret is missing."
-            exit 1
-          fi
-
-          if [ -z "${SERVER_HOST:-}" ]; then
-            echo "::error::SERVER_HOST secret is missing."
-            exit 1
-          fi
-
-          echo "Decoding SSH private key..."
-
-          printf '%s' "$SSH_PRIVATE_KEY_B64" | base64 --decode > "$HOME/.ssh/id_ed25519"
-
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
 
-          echo "Checking SSH private key..."
+          ssh-keyscan -H "$SERVER_HOST" >> "$HOME/.ssh/known_hosts"
 
-          ssh-keygen -y \
-            -f "$HOME/.ssh/id_ed25519" \
-            > "$HOME/.ssh/id_ed25519.pub"
-
-          echo "SSH private key is valid."
-
-          echo "SSH key fingerprint:"
-
-          ssh-keygen -lf "$HOME/.ssh/id_ed25519.pub"
-
-
-      # ========================================
-      # Add server host key
-      # ========================================
-
-      - name: Configure known hosts
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-
-        run: |
-          set -euo pipefail
-
-          ssh-keyscan \
-            -H \
-            "$SERVER_HOST" \
-            >> "$HOME/.ssh/known_hosts"
-
-          chmod 600 "$HOME/.ssh/known_hosts"
-
-          echo "Known host configured."
-
-
-      # ========================================
-      # Test SSH connection
-      # ========================================
+          echo "SSH configured."
 
       - name: Test SSH connection
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-
+        shell: bash
         run: |
           set -euo pipefail
 
           ssh \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
-            -o BatchMode=yes \
-            -o ConnectTimeout=20 \
             -i "$HOME/.ssh/id_ed25519" \
-            "root@$SERVER_HOST" \
-            "echo SSH_CONNECTION_OK && hostname && whoami"
+            "$SERVER_USER@$SERVER_HOST" \
+            'echo SSH_CONNECTION_OK'
 
-
-      # ========================================
-      # Deploy
-      # ========================================
-
-      - name: Deploy to server
+      - name: Deploy and start MK AI
+        shell: bash
         env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-
+          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          AI_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          AI_API_URL: ${{ secrets.OPENCODE_URL }}
+          AI_MODEL: ${{ vars.OPENCODE_MODEL }}
         run: |
           set -euo pipefail
+
+          echo "========================================"
+          echo "Connecting to server"
+          echo "========================================"
 
           ssh \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
-            -o BatchMode=yes \
-            -o ConnectTimeout=20 \
             -i "$HOME/.ssh/id_ed25519" \
-            "root@$SERVER_HOST" \
-            'bash -s' <<'REMOTE_SCRIPT'
+            "$SERVER_USER@$SERVER_HOST" \
+            "TELEGRAM_BOT_TOKEN='$TELEGRAM_BOT_TOKEN' \
+             AI_API_KEY='$AI_API_KEY' \
+             AI_API_URL='$AI_API_URL' \
+             AI_MODEL='$AI_MODEL' \
+             bash -s" <<'REMOTE_SCRIPT'
 
-          set -e
-
-          # ======================================
-          # Variables
-          # ======================================
+          set -euo pipefail
 
           REPO_DIR="/root/MK-AI-Telegram-Bot"
-          VENV_DIR="$REPO_DIR/.venv"
-          LOG_FILE="/root/mk-ai-bot.log"
 
-          echo "========================================"
-          echo "MK AI SERVER DEPLOYMENT"
-          echo "========================================"
-
-          echo
-          echo "Server:"
-          hostname
-
-          echo
-          echo "User:"
-          whoami
-
-          echo
           echo "========================================"
           echo "Updating repository"
           echo "========================================"
 
           if [ ! -d "$REPO_DIR/.git" ]; then
-
-              echo "Repository does not exist."
-              echo "Cloning repository..."
-
-              cd /root
-
-              git clone \
-                https://github.com/mkvenompro/MK-AI-Telegram-Bot.git \
-                MK-AI-Telegram-Bot
-
+              git clone https://github.com/mkvenompro/MK-AI-Telegram-Bot.git "$REPO_DIR"
           fi
 
           cd "$REPO_DIR"
 
           git fetch origin main
-
           git reset --hard origin/main
+          git clean -fd
 
-          echo
-          echo "Current commit:"
-
-          git rev-parse --short HEAD
-
-
-          # ======================================
-          # Install Python
-          # ======================================
-
-          echo
           echo "========================================"
-          echo "Installing Python dependencies"
+          echo "Installing system dependencies"
           echo "========================================"
 
           export DEBIAN_FRONTEND=noninteractive
 
-          apt-get update
+          apt-get update -y
 
           apt-get install -y \
-            python3 \
-            python3-pip \
-            python3-venv
+              python3 \
+              python3-venv \
+              python3-pip \
+              build-essential
 
-
-          # ======================================
-          # Create virtual environment
-          # ======================================
-
-          echo
           echo "========================================"
           echo "Creating virtual environment"
           echo "========================================"
 
-          if [ ! -d "$VENV_DIR" ]; then
-
-              python3 -m venv "$VENV_DIR"
-
+          if [ ! -d ".venv" ]; then
+              python3 -m venv .venv
           fi
 
+          .venv/bin/python -m ensurepip --upgrade || true
+          .venv/bin/python -m pip install --upgrade pip
 
-          # ======================================
-          # Upgrade pip
-          # ======================================
-
-          echo
-          echo "========================================"
-          echo "Updating pip"
-          echo "========================================"
-
-          "$VENV_DIR/bin/python" \
-            -m pip install --upgrade pip
-
-
-          # ======================================
-          # Install requirements
-          # ======================================
-
-          echo
           echo "========================================"
           echo "Installing requirements"
           echo "========================================"
 
-          "$VENV_DIR/bin/python" \
-            -m pip install \
-            -r requirements.txt
+          .venv/bin/python -m pip install -r requirements.txt
 
+          echo "========================================"
+          echo "Creating environment file"
+          echo "========================================"
 
-          # ======================================
-          # Stop old bot
-          # ======================================
+          umask 077
 
-          echo
+          cat > .env <<EOF
+          TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+          AI_API_KEY=${AI_API_KEY}
+          AI_API_URL=${AI_API_URL}
+          AI_MODEL=${AI_MODEL}
+          MAX_HISTORY=12
+          MAX_MESSAGE_LENGTH=4000
+          EOF
+
+          chmod 600 .env
+
           echo "========================================"
           echo "Stopping old MK AI process"
           echo "========================================"
 
-          pkill -f "$REPO_DIR/.venv/bin/python bot.py" || true
+          if [ -f "mk-ai.pid" ]; then
+              OLD_PID="$(cat mk-ai.pid || true)"
 
+              if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+                  kill "$OLD_PID" || true
+                  sleep 2
+              fi
+
+              rm -f mk-ai.pid
+          fi
+
+          pkill -f "python.*bot.py" || true
           sleep 2
 
-
-          # ======================================
-          # Start bot
-          # ======================================
-
-          echo
           echo "========================================"
           echo "Starting MK AI"
           echo "========================================"
 
-          cd "$REPO_DIR"
-
-          nohup "$VENV_DIR/bin/python" bot.py \
-            > "$LOG_FILE" 2>&1 < /dev/null &
+          nohup .venv/bin/python bot.py \
+              > mk-ai.log 2>&1 < /dev/null &
 
           BOT_PID=$!
 
-          echo "Bot PID: $BOT_PID"
+          echo "$BOT_PID" > mk-ai.pid
 
           sleep 5
 
+          echo "Bot PID: $BOT_PID"
 
-          # ======================================
-          # Check process
-          # ======================================
-
-          echo
           echo "========================================"
           echo "Checking MK AI"
           echo "========================================"
 
           if kill -0 "$BOT_PID" 2>/dev/null; then
-
-              echo "MK AI process is running."
-
+              echo "========================================"
+              echo "MK AI STARTED SUCCESSFULLY"
+              echo "========================================"
           else
+              echo "========================================"
+              echo "MK AI FAILED TO START"
+              echo "========================================"
 
-              echo "MK AI failed to start."
-
-              echo
               echo "===== LAST 100 LOG LINES ====="
 
-              tail -100 "$LOG_FILE" || true
+              tail -n 100 mk-ai.log || true
 
               exit 1
-
           fi
 
-
-          # ======================================
-          # Show logs
-          # ======================================
-
-          echo
           echo "========================================"
-          echo "MK AI LOG"
+          echo "Deployment completed"
           echo "========================================"
-
-          tail -30 "$LOG_FILE" || true
-
-
-          # ======================================
-          # Success
-          # ======================================
-
-          echo
-          echo "========================================"
-          echo "DEPLOY SUCCESS"
-          echo "========================================"
-
-          echo "Repository:"
-          echo "$REPO_DIR"
-
-          echo
-          echo "Python:"
-          "$VENV_DIR/bin/python" --version
-
-          echo
-          echo "Bot PID:"
-          echo "$BOT_PID"
-
-          echo
-          echo "The bot is now running on the server."
 
           REMOTE_SCRIPT
