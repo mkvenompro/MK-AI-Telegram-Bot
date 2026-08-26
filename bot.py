@@ -167,10 +167,6 @@ def main():
         .post_init(post_init)
         .request(telegram_request)
         .get_updates_request(updates_request)
-        .get_updates_connect_timeout(30.0)
-        .get_updates_read_timeout(90.0)
-        .get_updates_write_timeout(60.0)
-        .get_updates_pool_timeout(30.0)
         .build()
     )
 
