@@ -1,0 +1,127 @@
+name: Telegram Network Diagnostic
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: System information
+        run: |
+          echo "========================================"
+          echo "SYSTEM"
+          echo "========================================"
+          uname -a
+          cat /etc/os-release || true
+
+          echo
+          echo "Public IP:"
+          curl -4 --connect-timeout 10 --max-time 15 \
+            https://api.ipify.org || true
+          echo
+
+      - name: DNS
+        run: |
+          echo "========================================"
+          echo "DNS"
+          echo "========================================"
+
+          getent hosts api.telegram.org || true
+
+          echo
+          echo "IPv4:"
+          getent ahostsv4 api.telegram.org || true
+
+          echo
+          echo "IPv6:"
+          getent ahostsv6 api.telegram.org || true
+
+      - name: Telegram IPv4 HTTPS
+        run: |
+          echo "========================================"
+          echo "TELEGRAM IPv4 HTTPS"
+          echo "========================================"
+
+          curl -4 -v \
+            --connect-timeout 10 \
+            --max-time 20 \
+            https://api.telegram.org/
+
+      - name: Telegram IPv4 forced IP
+        run: |
+          echo "========================================"
+          echo "TELEGRAM FORCED IPv4"
+          echo "========================================"
+
+          curl -4 -v \
+            --connect-timeout 10 \
+            --max-time 20 \
+            --resolve api.telegram.org:443:149.154.166.110 \
+            https://api.telegram.org/
+
+      - name: Telegram HTTP 1.1
+        run: |
+          echo "========================================"
+          echo "TELEGRAM HTTP/1.1"
+          echo "========================================"
+
+          curl -4 --http1.1 -v \
+            --connect-timeout 10 \
+            --max-time 20 \
+            --resolve api.telegram.org:443:149.154.166.110 \
+            https://api.telegram.org/
+
+      - name: Telegram headers
+        run: |
+          echo "========================================"
+          echo "TELEGRAM HEADERS"
+          echo "========================================"
+
+          curl -4 -I \
+            --connect-timeout 10 \
+            --max-time 20 \
+            --resolve api.telegram.org:443:149.154.166.110 \
+            https://api.telegram.org/
+
+      - name: TCP port test
+        run: |
+          echo "========================================"
+          echo "TCP 443"
+          echo "========================================"
+
+          timeout 10 bash -c \
+            '</dev/tcp/149.154.166.110/443' \
+            && echo "TCP 443: OPEN" \
+            || echo "TCP 443: FAILED"
+
+      - name: Route
+        run: |
+          echo "========================================"
+          echo "ROUTE"
+          echo "========================================"
+
+          ip route || true
+
+          echo
+          echo "Route to Telegram:"
+          ip route get 149.154.166.110 || true
+
+      - name: TLS test
+        run: |
+          echo "========================================"
+          echo "TLS"
+          echo "========================================"
+
+          timeout 15 openssl s_client \
+            -connect 149.154.166.110:443 \
+            -servername api.telegram.org \
+            -brief </dev/null || true
+
+      - name: Finished
+        run: |
+          echo
+          echo "========================================"
+          echo "DIAGNOSTIC FINISHED"
+          echo "========================================"
