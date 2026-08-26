@@ -10,11 +10,15 @@ jobs:
   bot:
     runs-on: ubuntu-latest
 
-    timeout-minutes: 360
-
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       AI_API_KEY: ${{ secrets.AI_API_KEY }}
+      AI_API_URL: https://openrouter.ai/api/v1/chat/completions
+      AI_MODEL: ${{ vars.AI_MODEL || 'openrouter/free' }}
+
+
+    timeout-minutes: 360
+
     steps:
       - name: Force Telegram API IPv4
         shell: bash
