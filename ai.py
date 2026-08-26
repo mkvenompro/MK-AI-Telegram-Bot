@@ -5,55 +5,46 @@ import httpx
 
 
 # ============================================================
-# OLLAMA CONFIG
+# LLAMA.CPP CONFIG
 # ============================================================
 
-OLLAMA_URL = os.getenv(
-    "OLLAMA_URL",
-    "http://127.0.0.1:11434",
+LLAMA_URL = os.getenv(
+    "LLAMA_URL",
+    "http://127.0.0.1:8080"
 ).strip().rstrip("/")
 
-PRIMARY_MODEL = os.getenv(
-    "OLLAMA_MODEL",
-    os.getenv("AI_MODEL", "qwen3:4b"),
+LLAMA_MODEL = os.getenv(
+    "LLAMA_MODEL",
+    "Qwen3-4B-Q4_K_M.gguf"
 ).strip()
 
-FALLBACK_MODEL = os.getenv(
-    "OLLAMA_FALLBACK_MODEL",
-    os.getenv("AI_FALLBACK_MODEL", "qwen3:1.7b"),
-).strip()
-
-THINKING = os.getenv(
-    "AI_THINKING",
-    "true",
-).strip().lower() in ("1", "true", "yes", "on")
-
-NUM_PREDICT = int(
+MAX_TOKENS = int(
     os.getenv(
-        "OLLAMA_NUM_PREDICT",
-        os.getenv("AI_MAX_TOKENS", "512"),
+        "AI_MAX_TOKENS",
+        "768"
     )
 )
 
 TEMPERATURE = float(
     os.getenv(
-        "OLLAMA_TEMPERATURE",
-        os.getenv("AI_TEMPERATURE", "0.6"),
+        "AI_TEMPERATURE",
+        "0.4"
     )
 )
 
 TOP_P = float(
-    os.getenv("OLLAMA_TOP_P", "0.95")
+    os.getenv(
+        "AI_TOP_P",
+        "0.8"
+    )
 )
 
-TOP_K = int(
-    os.getenv("OLLAMA_TOP_K", "20")
+TIMEOUT = float(
+    os.getenv(
+        "AI_TIMEOUT",
+        "120"
+    )
 )
-
-KEEP_ALIVE = os.getenv(
-    "OLLAMA_KEEP_ALIVE",
-    "15m",
-).strip()
 
 
 # ============================================================
@@ -63,34 +54,76 @@ KEEP_ALIVE = os.getenv(
 SYSTEM_PROMPT = """
 أنت Spider AI Assistant داخل Telegram.
 
-قواعد مهمة:
+القواعد المهمة:
 
-- افهم كلام المستخدم قبل الرد.
-- أجب مباشرة على السؤال.
-- إذا كان المستخدم يتحدث بالعربية، استخدم العربية.
+- أجب مباشرة على سؤال المستخدم.
+- إذا كان المستخدم يتكلم بالعربية، استخدم العربية.
 - في الكلام العادي استخدم اللهجة المصرية بشكل طبيعي.
-- لا تكرر رسالة المستخدم.
-- لا تقل "أنا شارب ايه يا أبو صلاح" عندما يسأل المستخدم "انت شارب ايه".
-- لا تعيد صياغة السؤال بدل الإجابة عليه.
-- لا تبدأ الرد بـ Okay أو Let me check أو ما شابه.
-- لا تعرض عملية التفكير الداخلية أو reasoning للمستخدم.
-- استخدم التفكير الداخلي للوصول لإجابة أفضل عندما يكون ذلك مفيداً.
+- كن محترماً حتى لو المستخدم بيتكلم بعصبية أو هزار.
+- لا تكرر كلام المستخدم بدون سبب.
+- لا تبدأ الرد بكلمات مثل:
+  Okay
+  Sure
+  Let me check
+  I understand
+- لا تعرض reasoning أو التفكير الداخلي للمستخدم.
+- فكّر داخلياً قبل الإجابة عندما يكون السؤال يحتاج تحليلاً.
 - بعد التفكير أعطِ النتيجة النهائية فقط.
-- الأسئلة البسيطة: رد قصير وطبيعي.
-- الأسئلة التقنية: قدم حلاً واضحاً ومباشراً.
-- لا تخترع معلومات غير مؤكدة.
-- تعامل مع المستخدم باحترام حتى لو كان أسلوبه هزاراً أو عامياً.
+- الأسئلة البسيطة يكون ردها قصيراً.
+- لا تتفلسف في الأسئلة البسيطة.
+- لا تخترع معلومات.
+- إذا لم تكن متأكداً، قل إنك غير متأكد.
 """.strip()
 
 
 # ============================================================
-# OLLAMA CHAT
+# EXTRACT FINAL ANSWER
 # ============================================================
 
-async def _ollama_chat(
-    model: str,
+def extract_final_content(message: dict) -> str:
+    """
+    llama.cpp with reasoning-format=deepseek normally returns:
+
+    {
+        "content": "...",
+        "reasoning_content": "..."
+    }
+
+    We ONLY return content.
+
+    Also handles models/configurations that put
+    <think>...</think> directly inside content.
+    """
+
+    content = message.get("content")
+
+    if content is None:
+        content = ""
+
+    if not isinstance(content, str):
+        content = str(content)
+
+    content = content.strip()
+
+    # Handle raw <think> blocks just in case
+    if "<think>" in content and "</think>" in content:
+        after = content.split("</think>", 1)[1]
+        content = after.strip()
+
+    # Remove an unfinished thinking prefix
+    if content.startswith("<think>"):
+        content = content.replace("<think>", "", 1).strip()
+
+    return content
+
+
+# ============================================================
+# LLAMA.CPP REQUEST
+# ============================================================
+
+async def _llama_chat(
     messages: list,
-    timeout: float = 120.0,
+    timeout: float = TIMEOUT,
 ) -> str:
 
     clean_messages = [
@@ -100,7 +133,7 @@ async def _ollama_chat(
         }
     ]
 
-    for msg in messages[-6:]:
+    for msg in messages[-8:]:
 
         if not isinstance(msg, dict):
             continue
@@ -119,6 +152,18 @@ async def _ollama_chat(
         if not content:
             continue
 
+        # Never send internal reasoning back into history
+        if role == "assistant":
+
+            if "<think>" in content:
+                if "</think>" in content:
+                    content = content.split(
+                        "</think>",
+                        1
+                    )[1].strip()
+                else:
+                    continue
+
         clean_messages.append(
             {
                 "role": role,
@@ -127,28 +172,21 @@ async def _ollama_chat(
         )
 
     payload = {
-        "model": model,
+        "model": LLAMA_MODEL,
         "messages": clean_messages,
 
-        # Qwen3 thinking
-        "think": THINKING,
-
+        # llama.cpp OpenAI-compatible endpoint
         "stream": False,
 
-        "options": {
-            "temperature": TEMPERATURE,
-            "top_p": TOP_P,
-            "top_k": TOP_K,
-            "num_predict": NUM_PREDICT,
-        },
-
-        "keep_alive": KEEP_ALIVE,
+        "temperature": TEMPERATURE,
+        "top_p": TOP_P,
+        "max_tokens": MAX_TOKENS,
     }
 
     timeout_config = httpx.Timeout(
         connect=5.0,
         read=timeout,
-        write=15.0,
+        write=10.0,
         pool=10.0,
     )
 
@@ -157,7 +195,7 @@ async def _ollama_chat(
     ) as client:
 
         response = await client.post(
-            f"{OLLAMA_URL}/api/chat",
+            f"{LLAMA_URL}/v1/chat/completions",
             json=payload,
         )
 
@@ -165,28 +203,31 @@ async def _ollama_chat(
 
         data = response.json()
 
-    message = data.get("message") or {}
+        choices = data.get("choices") or []
 
-    # IMPORTANT:
-    # Ollama may return:
-    # message.thinking
-    # message.content
-    #
-    # We NEVER expose message.thinking to Telegram.
+        if not choices:
+            raise RuntimeError(
+                f"llama.cpp returned no choices: {data}"
+            )
 
-    content = message.get("content", "")
+        message = choices[0].get("message") or {}
 
-    if not isinstance(content, str):
-        content = str(content)
+        answer = extract_final_content(message)
 
-    content = content.strip()
+        if not answer:
 
-    if not content:
-        raise RuntimeError(
-            f"Empty final response from {model}"
-        )
+            reasoning = message.get(
+                "reasoning_content",
+                ""
+            )
 
-    return content
+            raise RuntimeError(
+                "llama.cpp returned reasoning but no "
+                "final answer. Increase AI_MAX_TOKENS. "
+                f"reasoning_chars={len(str(reasoning))}"
+            )
+
+        return answer
 
 
 # ============================================================
@@ -201,13 +242,13 @@ async def ask_ai(
     prompt = str(prompt).strip()
 
     if not prompt:
-        return "قولّي سؤالك وأنا معاك 😄"
+        return "اكتبلي سؤالك الأول 😄"
 
     messages = []
 
     if history:
 
-        for msg in history[-6:]:
+        for msg in history[-8:]:
 
             if not isinstance(msg, dict):
                 continue
@@ -236,7 +277,6 @@ async def ask_ai(
     # Prevent duplicate current message
     if (
         not messages
-        or messages[-1].get("role") != "user"
         or messages[-1].get("content") != prompt
     ):
         messages.append(
@@ -246,62 +286,35 @@ async def ask_ai(
             }
         )
 
-    # ========================================================
-    # PRIMARY
-    # ========================================================
-
     try:
 
-        return await _ollama_chat(
-            PRIMARY_MODEL,
-            messages,
+        return await _llama_chat(
+            messages
         )
 
-    except Exception as primary_error:
+    except Exception as error:
 
         print(
-            f"[AI] Primary model error ({PRIMARY_MODEL}): "
-            f"{primary_error!r}",
+            "llama.cpp error:",
+            repr(error),
             flush=True,
         )
 
-    # ========================================================
-    # FALLBACK
-    # ========================================================
+        return (
+            "❌ حصل خطأ في الـAI دلوقتي، "
+            "جرب تاني بعد شوية."
+        )
 
-    if FALLBACK_MODEL and FALLBACK_MODEL != PRIMARY_MODEL:
-
-        try:
-
-            return await _ollama_chat(
-                FALLBACK_MODEL,
-                messages,
-            )
-
-        except Exception as fallback_error:
-
-            print(
-                f"[AI] Fallback model error ({FALLBACK_MODEL}): "
-                f"{fallback_error!r}",
-                flush=True,
-            )
-
-    return (
-        "❌ الـ AI مش قادر يرد دلوقتي، "
-        "جرب تاني بعد شوية."
-    )
-
-
-# ============================================================
-# COMPATIBILITY FUNCTIONS
-# ============================================================
 
 async def generate_response(
     prompt: str,
     history: Optional[list] = None,
 ) -> str:
 
-    return await ask_ai(prompt, history)
+    return await ask_ai(
+        prompt,
+        history
+    )
 
 
 async def chat(
@@ -309,19 +322,17 @@ async def chat(
     history: Optional[list] = None,
 ) -> str:
 
-    return await ask_ai(prompt, history)
+    return await ask_ai(
+        prompt,
+        history
+    )
 
 
 def get_model_info():
 
     return {
-        "provider": "ollama",
-        "url": OLLAMA_URL,
-        "model": PRIMARY_MODEL,
-        "fallback": FALLBACK_MODEL,
-        "thinking": THINKING,
-        "num_predict": NUM_PREDICT,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "top_k": TOP_K,
+        "provider": "llama.cpp",
+        "url": LLAMA_URL,
+        "model": LLAMA_MODEL,
+        "thinking": True,
     }
