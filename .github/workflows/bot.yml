@@ -7,8 +7,8 @@ on:
       - main
 
 concurrency:
-  group: mk-ai-deploy
-  cancel-in-progress: true
+  group: mk-ai-server-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -23,26 +23,32 @@ jobs:
         shell: bash
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_HOST: 94.237.93.1
         run: |
           set -euo pipefail
 
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
 
-          # Write the private key exactly as stored in GitHub Secrets
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          # Write private key exactly as stored in GitHub Secrets
+          printf '%s\n' "$SSH_PRIVATE_KEY" \
+            | tr -d '\r' \
+            > "$HOME/.ssh/id_ed25519"
+
           chmod 600 "$HOME/.ssh/id_ed25519"
 
-          # Verify that the private key is valid
-          ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > "$HOME/.ssh/id_ed25519.pub"
+          # Validate private key before trying SSH
+          ssh-keygen -y -f "$HOME/.ssh/id_ed25519" \
+            > "$HOME/.ssh/id_ed25519.pub"
 
-          # Trust the server host key
-          ssh-keyscan -H 94.237.93.1 >> "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keyscan -H "$SERVER_HOST" \
+            >> "$HOME/.ssh/known_hosts"
 
-          echo "SSH key configured successfully."
+          chmod 644 "$HOME/.ssh/known_hosts"
 
-      - name: Test SSH connection
+          echo "SSH key loaded successfully."
+
+      - name: Test SSH
         shell: bash
         run: |
           set -euo pipefail
@@ -50,12 +56,11 @@ jobs:
           ssh \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
-            -o ConnectTimeout=20 \
             -i "$HOME/.ssh/id_ed25519" \
             root@94.237.93.1 \
-            "echo 'SSH CONNECTION OK'; hostname; whoami"
+            "echo 'SSH connection OK'; hostname; whoami"
 
-      - name: Deploy repository
+      - name: Deploy MK AI Bot
         shell: bash
         run: |
           set -euo pipefail
@@ -63,51 +68,57 @@ jobs:
           ssh \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
-            -o ConnectTimeout=20 \
             -i "$HOME/.ssh/id_ed25519" \
             root@94.237.93.1 \
-            'bash -s' <<'REMOTE'
-          set -e
+            'bash -s' <<'REMOTE_SCRIPT'
+
+          set -euo pipefail
 
           APP_DIR="/root/MK-AI-Telegram-Bot"
+          REPO="https://github.com/mkvenompro/MK-AI-Telegram-Bot.git"
 
           echo "========================================"
           echo "MK AI SERVER DEPLOY"
           echo "========================================"
 
+          echo
+          echo "[1/7] Installing required packages..."
+
+          export DEBIAN_FRONTEND=noninteractive
+
+          apt-get update -y
+
+          apt-get install -y \
+            git \
+            python3 \
+            python3-venv \
+            python3-pip
+
+          echo
+          echo "[2/7] Preparing repository..."
+
           if [ ! -d "$APP_DIR/.git" ]; then
-              echo "Repository does not exist. Cloning..."
+
               rm -rf "$APP_DIR"
 
-              git clone \
-                https://github.com/mkvenompro/MK-AI-Telegram-Bot.git \
-                "$APP_DIR"
+              git clone "$REPO" "$APP_DIR"
+
           else
-              echo "Repository exists. Updating..."
 
               cd "$APP_DIR"
 
-              git fetch origin main
+              git fetch origin
+
               git reset --hard origin/main
+
               git clean -fd
+
           fi
 
           cd "$APP_DIR"
 
           echo
-          echo "Installing system dependencies..."
-
-          export DEBIAN_FRONTEND=noninteractive
-
-          apt-get update -y
-          apt-get install -y \
-            python3 \
-            python3-venv \
-            python3-pip \
-            git
-
-          echo
-          echo "Creating virtual environment..."
+          echo "[3/7] Creating Python environment..."
 
           if [ ! -d ".venv" ]; then
               python3 -m venv .venv
@@ -115,96 +126,22 @@ jobs:
 
           .venv/bin/python -m pip install --upgrade pip
 
-          echo
-          echo "Installing Python requirements..."
-
           .venv/bin/pip install -r requirements.txt
 
           echo
-          echo "Creating data directory..."
-
-          mkdir -p data
-
-          echo
-          echo "Creating environment file..."
+          echo "[4/7] Checking environment..."
 
           if [ ! -f ".env" ]; then
-              touch .env
-              chmod 600 .env
+              echo
+              echo "ERROR: /root/MK-AI-Telegram-Bot/.env does not exist."
+              echo "Create the .env file on the server first."
+              exit 1
           fi
 
           echo
-          echo "========================================"
-          echo "DEPLOY COMPLETE"
-          echo "========================================"
+          echo "[5/7] Creating systemd service..."
 
-          echo "Repository:"
-          git remote -v
-
-          echo
-          echo "Commit:"
-          git rev-parse --short HEAD
-
-          echo
-          echo "Python:"
-          .venv/bin/python --version
-
-          echo
-          echo "Files:"
-          ls -lah
-
-          REMOTE
-
-      - name: Update server environment
-        shell: bash
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          OPENCODE_URL: ${{ secrets.OPENCODE_URL }}
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}
-        run: |
-          set -euo pipefail
-
-          ssh \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o ConnectTimeout=20 \
-            -i "$HOME/.ssh/id_ed25519" \
-            root@94.237.93.1 \
-            "cat > /root/MK-AI-Telegram-Bot/.env" <<EOF
-          TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-          AI_API_URL=${OPENCODE_URL}
-          AI_API_KEY=${OPENCODE_API_KEY}
-          AI_MODEL=${OPENCODE_MODEL}
-          MAX_HISTORY=12
-          MAX_MESSAGE_LENGTH=4000
-          EOF
-
-          ssh \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o ConnectTimeout=20 \
-            -i "$HOME/.ssh/id_ed25519" \
-            root@94.237.93.1 \
-            "chmod 600 /root/MK-AI-Telegram-Bot/.env"
-
-      - name: Install systemd service
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ssh \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o ConnectTimeout=20 \
-            -i "$HOME/.ssh/id_ed25519" \
-            root@94.237.93.1 \
-            'bash -s' <<'REMOTE'
-          set -e
-
-          APP_DIR="/root/MK-AI-Telegram-Bot"
-
-          cat > /etc/systemd/system/mk-ai-telegram.service <<EOF
+          cat > /etc/systemd/system/mk-ai-telegram-bot.service <<'SERVICE'
           [Unit]
           Description=MK AI Telegram Bot
           After=network-online.target
@@ -212,47 +149,52 @@ jobs:
 
           [Service]
           Type=simple
-          WorkingDirectory=$APP_DIR
-          ExecStart=$APP_DIR/.venv/bin/python $APP_DIR/bot.py
+
+          User=root
+          Group=root
+
+          WorkingDirectory=/root/MK-AI-Telegram-Bot
+
+          EnvironmentFile=/root/MK-AI-Telegram-Bot/.env
+
+          ExecStart=/root/MK-AI-Telegram-Bot/.venv/bin/python /root/MK-AI-Telegram-Bot/bot.py
+
           Restart=always
           RestartSec=5
 
-          EnvironmentFile=$APP_DIR/.env
+          KillSignal=SIGINT
 
           StandardOutput=journal
           StandardError=journal
 
           [Install]
           WantedBy=multi-user.target
-          EOF
+          SERVICE
+
+          echo
+          echo "[6/7] Restarting MK AI..."
 
           systemctl daemon-reload
 
-          systemctl enable mk-ai-telegram.service
-          systemctl restart mk-ai-telegram.service
+          systemctl enable mk-ai-telegram-bot.service
+
+          systemctl restart mk-ai-telegram-bot.service
 
           sleep 3
 
           echo
-          echo "========================================"
-          echo "SERVICE STATUS"
-          echo "========================================"
+          echo "[7/7] Checking service..."
 
-          systemctl --no-pager --full status mk-ai-telegram.service || true
+          systemctl --no-pager --full status mk-ai-telegram-bot.service || true
 
           echo
           echo "========================================"
-          echo "RECENT LOGS"
+          echo "DEPLOY FINISHED"
           echo "========================================"
 
-          journalctl \
-            -u mk-ai-telegram.service \
-            -n 30 \
-            --no-pager || true
+          REMOTE_SCRIPT
 
-          REMOTE
-
-      - name: Final server check
+      - name: Verify bot service
         shell: bash
         run: |
           set -euo pipefail
@@ -260,7 +202,17 @@ jobs:
           ssh \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
-            -o ConnectTimeout=20 \
             -i "$HOME/.ssh/id_ed25519" \
             root@94.237.93.1 \
-            'systemctl is-active --quiet mk-ai-telegram.service && echo "MK AI BOT IS RUNNING"'
+            "systemctl is-active --quiet mk-ai-telegram-bot.service"
+
+          echo "MK AI Telegram Bot is running."
+
+      - name: Cleanup SSH key
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$HOME/.ssh/id_ed25519"
+          rm -f "$HOME/.ssh/id_ed25519.pub"
+
+          echo "SSH key removed from GitHub runner."
