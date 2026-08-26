@@ -128,4 +128,15 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
+      - name: Check AI_API_KEY Secret
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+        run: |
+          if [ -z "$AI_API_KEY" ]; then
+            echo "❌ AI_API_KEY is NOT available"
+            exit 1
+          fi
+
+          echo "✅ AI_API_KEY is available"
+          echo "Length: ${#AI_API_KEY}"
           python bot.py
