@@ -79,9 +79,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
 
         mentioned = False
+        is_reply_to_bot = False
 
-        # Check Telegram message entities first.
-        # This is the reliable way to detect @username mentions.
+        # ---------------------------------------------
+        # 1. Check @mention using Telegram entities
+        # ---------------------------------------------
+
         if message.entities:
             for entity in message.entities:
                 if entity.type == "mention":
@@ -98,21 +101,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         mentioned = True
                         break
 
-        # Fallback to normal text matching.
+        # Fallback mention detection
         if not mentioned and BOT_USERNAME:
             mentioned = (
                 f"@{BOT_USERNAME.lower()}" in text.lower()
             )
 
-        if not mentioned:
+        # ---------------------------------------------
+        # 2. Check if this is a reply to the bot
+        # ---------------------------------------------
+
+        if message.reply_to_message:
+
+            replied = message.reply_to_message
+
+            # Direct reply to a message sent by this bot
+            if replied.from_user and replied.from_user.id == (
+                context.bot.id
+            ):
+                is_reply_to_bot = True
+
+        # ---------------------------------------------
+        # 3. Ignore unrelated group messages
+        # ---------------------------------------------
+
+        if not mentioned and not is_reply_to_bot:
             return
+
+        # ---------------------------------------------
+        # 4. Build question
+        # ---------------------------------------------
 
         question = clean_question(text)
 
+        # If replying to the bot, include the previous
+        # bot message as context so the AI understands
+        # what the user is talking about.
+        if is_reply_to_bot and message.reply_to_message.text:
+
+            previous_bot_message = (
+                message.reply_to_message.text.strip()
+            )
+
+            if question:
+                question = (
+                    "السياق السابق من رد البوت:\n"
+                    + previous_bot_message
+                    + "\n\n"
+                    "رسالة المستخدم الحالية:\n"
+                    + question
+                )
+            else:
+                question = previous_bot_message
+
         logger.info(
-            "Group mention detected in chat %s: %s",
-            update.effective_chat.id,
-            question,
+            "Group message accepted: mention=%s reply_to_bot=%s question=%s",
+            mentioned,
+            is_reply_to_bot,
+            question[:500],
         )
 
     else:
