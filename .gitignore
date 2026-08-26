@@ -19,3 +19,6 @@ venv/
 *.bak
 *.backup
 *.log
+*.pid
+backup-*/
+*.backup-*
