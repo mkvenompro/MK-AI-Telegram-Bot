@@ -77,12 +77,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_type = update.effective_chat.type
 
     if chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        mention = f'@{BOT_USERNAME.lower()}'
 
-        if mention not in text.lower():
+        mentioned = False
+
+        # Check Telegram message entities first.
+        # This is the reliable way to detect @username mentions.
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == "mention":
+                    mention_text = text[
+                        entity.offset:
+                        entity.offset + entity.length
+                    ]
+
+                    if (
+                        BOT_USERNAME
+                        and mention_text.lower()
+                        == f"@{BOT_USERNAME.lower()}"
+                    ):
+                        mentioned = True
+                        break
+
+        # Fallback to normal text matching.
+        if not mentioned and BOT_USERNAME:
+            mentioned = (
+                f"@{BOT_USERNAME.lower()}" in text.lower()
+            )
+
+        if not mentioned:
             return
 
         question = clean_question(text)
+
+        logger.info(
+            "Group mention detected in chat %s: %s",
+            update.effective_chat.id,
+            question,
+        )
+
     else:
         question = text
 
