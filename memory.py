@@ -1,51 +1,122 @@
 import json
 import os
-from threading import Lock
+import threading
 
-MEMORY_FILE = "data/memory.json"
-_lock = Lock()
+MEMORY_FILE = os.path.expanduser(
+    "~/MK-AI-Telegram-Bot/memory.json"
+)
+
+_lock = threading.Lock()
+
+MAX_STORED = 40
+
 
 def _load():
-    os.makedirs("data", exist_ok=True)
 
     if not os.path.exists(MEMORY_FILE):
         return {}
 
     try:
-        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(
+            MEMORY_FILE,
+            "r",
+            encoding="utf-8",
+        ) as f:
+            data = json.load(f)
+
+        return data if isinstance(data, dict) else {}
+
     except Exception:
         return {}
 
+
 def _save(data):
-    os.makedirs("data", exist_ok=True)
-    temp = MEMORY_FILE + ".tmp"
 
-    with open(temp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp = MEMORY_FILE + ".tmp"
 
-    os.replace(temp, MEMORY_FILE)
+    with open(
+        tmp,
+        "w",
+        encoding="utf-8",
+    ) as f:
 
-def get_history(chat_id, max_messages=12):
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    os.replace(
+        tmp,
+        MEMORY_FILE,
+    )
+
+
+def get_history(
+    chat_id,
+    limit=12,
+):
+
+    key = str(chat_id)
+
     with _lock:
-        data = _load()
-        return data.get(str(chat_id), [])[-max_messages:]
 
-def add_message(chat_id, role, content, max_messages=12):
+        data = _load()
+
+        history = data.get(
+            key,
+            [],
+        )
+
+        if not isinstance(history, list):
+            return []
+
+        return history[-limit:]
+
+
+def add_message(
+    chat_id,
+    role,
+    content,
+    limit=12,
+):
+
+    key = str(chat_id)
+
     with _lock:
+
         data = _load()
-        key = str(chat_id)
 
-        if key not in data:
-            data[key] = []
+        history = data.get(
+            key,
+            [],
+        )
 
-        data[key].append({"role": role, "content": content})
-        data[key] = data[key][-max_messages:]
+        if not isinstance(history, list):
+            history = []
+
+        history.append({
+            "role": role,
+            "content": str(content),
+        })
+
+        data[key] = history[-MAX_STORED:]
 
         _save(data)
 
+
 def clear_history(chat_id):
+
+    key = str(chat_id)
+
     with _lock:
+
         data = _load()
-        data.pop(str(chat_id), None)
+
+        data.pop(
+            key,
+            None,
+        )
+
         _save(data)
